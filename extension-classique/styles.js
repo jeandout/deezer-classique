@@ -132,6 +132,13 @@ select option { background: var(--bg); color: var(--fg); }
   border-bottom: 1px solid var(--line); color: var(--fg); padding: 12px 8px; cursor: pointer; font-size: 14px; }
 .w-work:hover { background: var(--bg2); }
 .w-work .star { color: var(--acc); }
+/* Listes d'œuvres regroupées par compositeur */
+.w-group { margin-top: 10px; }
+.w-group + .w-group { margin-top: 22px; }
+.w-group-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; padding: 0 8px 6px; border-bottom: 2px solid var(--line); }
+.w-group-name { font-size: 17px; font-weight: 800; color: var(--fg); text-align: left; }
+.w-group-name:hover { color: var(--link); }
+.w-group .w-work { padding-left: 16px; }
 .tag { font-size: 12px; color: var(--mut); background: var(--bg2); border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
 .w-workhead { padding: 4px 24px 12px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--line); }
 .w-status { display: flex; flex-direction: column; gap: 6px; }

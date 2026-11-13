@@ -210,6 +210,16 @@ function composerKey(c) {
   return norm(c.name).replace(/\s/g, "").slice(0, 5);
 }
 
+// Le compositeur est-il nommé dans ce texte ? Mot entier, avec une petite tolérance
+// d'orthographe (Rachmaninov ≈ Rachmaninoff) mais sans confondre deux noms voisins
+// (« Berliner Philharmoniker » n'est pas Berlioz).
+function mentionsComposer(text, c) {
+  const last = norm(c.name).split(" ").pop() || "";
+  if (last.length < 3) return false;
+  const key = last.slice(0, Math.min(5, last.length));
+  return norm(text).split(" ").some((w) => w === last || (w.startsWith(key) && levenshtein(w, last) <= 2));
+}
+
 // --- Recherche des enregistrements d'une œuvre sur Deezer --------------------
 function compactAlbumFull(a) {
   return {
@@ -239,6 +249,12 @@ async function dzAlbumFull(id) {
 
 // Une piste appartient à l'œuvre si son titre le dit. Le titre de l'album ne sert
 // que pour les pistes qui ne nomment aucune œuvre (« I. Moderato »).
+// Piste préfixée par un autre compositeur (« Verdi: Requiem: I. Introit »).
+function namesOtherComposer(title, composer) {
+  const { composer: named } = splitTrackTitle(title);
+  return !!named && !mentionsComposer(named, composer);
+}
+
 // Noms d'orchestres et de salles à ignorer dans un titre d'album
 // (« Chicago Symphony Orchestra plays Wagner » ne parle pas d'une symphonie).
 const ENSEMBLE_WORDS_RE = /\b(symphony|symphonic|philharmonic|chamber|radio|festival|youth)\s+(orchestra|orchestre|band|hall|choir|chorus)\b|\b(sinfonieorchester|symphonieorchester|orchestre symphonique|orchestre philharmonique|orchestra sinfonica)\b/g;
@@ -314,7 +330,7 @@ function queriesFor(composer, work, sig) {
 }
 
 async function searchWork(composer, work, send, isCancelled) {
-  const key = `ws7:${work.id}`;
+  const key = `ws8:${work.id}`;
   const hit = await cacheGet(key, TTL.workSearch);
   if (hit) {
     send({ kind: "entries", entries: hit.entries });
@@ -334,6 +350,7 @@ async function searchWork(composer, work, send, isCancelled) {
       const d = await dz(`/search/track?q=${encodeURIComponent(q)}&limit=100&index=${index}`);
       for (const t of d.data || []) {
         if (!trackMatches(sig, t.title, t.album?.title || "")) continue;
+        if (namesOtherComposer(t.title, composer)) continue; // « Verdi: Requiem » pour le Requiem de Berlioz
         tracks.set(t.id, t);
       }
       send({ kind: "progress", phase: "deezer", done: ++step, total: queries.length * 3 });
@@ -356,12 +373,11 @@ async function searchWork(composer, work, send, isCancelled) {
     const album = await dzAlbumFull(albumId);
     send({ kind: "progress", phase: "albums", done: ++n, total: byAlbum.size });
     if (!album) continue;
-    const hay = norm(`${album.contributors.join(" ")} ${album.title} ${trs.map((t) => t.title).join(" ")}`).replace(/\s/g, "");
-    if (ck && !hay.includes(ck)) continue; // autre compositeur
+    if (!mentionsComposer(`${album.contributors.join(" ")} ${album.title} ${trs.map((t) => t.title).join(" ")}`, composer)) continue; // autre compositeur
     // Toutes les pistes de l'album qui appartiennent à l'œuvre (tous les mouvements),
     // en gardant l'ISRC connu par la recherche.
     const isrcs = new Map(trs.map((t) => [t.id, t.isrc]));
-    const fromAlbum = album.tracks.filter((t) => trackMatches(sig, t.title, album.title))
+    const fromAlbum = album.tracks.filter((t) => trackMatches(sig, t.title, album.title) && !namesOtherComposer(t.title, composer))
       .map((t) => ({ ...t, isrc: isrcs.get(t.id) || "" }));
     const known = new Set(fromAlbum.map((t) => t.id));
     const all = [...fromAlbum, ...trs.filter((t) => !known.has(t.id))];
