@@ -206,7 +206,7 @@ window.__dzWorks = function createWorks(ctx) {
   function derive(e) {
     const mb = S.enrich.get(e.id);
     const ck = composerKey();
-    const contrib = e.album.contributors.filter((n) => !norm(n).replace(/\s/g, "").includes(ck));
+    const contrib = e.album.contributors.filter((n) => !norm(n).replace(/\s/g, "").includes(ck) && !/^(various artists|divers|artistes divers|verschiedene)/i.test(n));
     let soloists, instruments = [], conductors, ensembles, guessed = false;
     if (mb) {
       soloists = mb.soloists.map((s) => s.name);
@@ -331,7 +331,8 @@ window.__dzWorks = function createWorks(ctx) {
       r.results,
       h("h3", {}, "Compositeurs populaires"),
       r.popular,
-      h("label", { class: "pref small muted" },
+      // Réglages propres à l'extension ou à l'application web.
+      ctx.homeFooter ? ctx.homeFooter() : h("label", { class: "pref small muted" },
         h("input", { type: "checkbox", checked: ctx.prefs().inApp !== false, onchange: (e) => ctx.setPref("inApp", e.target.checked) }),
         " Ouvrir les albums sans recharger la page (décochez si un clic sur un album ne fait rien)")));
     if (!S.popular) call("ooPopularComposers").then((p) => { S.popular = p; schedule(); }).catch(() => {});
@@ -419,7 +420,13 @@ window.__dzWorks = function createWorks(ctx) {
   function buildWork(r) {
     const c = S.composer, w = S.work;
     r.status = h("div", { class: "w-status" });
-    r.facets = h("aside", { class: "w-facets" });
+    // Filtres : colonne de gauche ; sur écran étroit, panneau qui glisse depuis le bas.
+    r.facets = h("div", { class: "w-facets-body" });
+    r.filterBtn = h("button", { class: "btn w-filter-btn", onclick: () => r.root.classList.add("show-filters") }, "Filtres");
+    const facetsBox = h("aside", { class: "w-facets" },
+      h("div", { class: "w-facets-head" }, h("span", { class: "strong" }, "Filtres"),
+        h("button", { class: "btn primary", onclick: () => r.root.classList.remove("show-filters") }, "Voir les résultats")),
+      r.facets);
     r.grid = h("div", { class: "grid w-grid" });
     r.tail = h("div", { class: "tail" });
     r.count = h("span", { class: "muted small" });
@@ -428,9 +435,10 @@ window.__dzWorks = function createWorks(ctx) {
         crumbs({ label: "Compositeurs", onclick: () => go("home") }, { label: c.complete_name || c.name, onclick: () => go("composer") }, { label: w.title }),
         h("h2", {}, w.title), r.movs = h("div", { class: "w-movs" }), r.status),
       h("div", { class: "w-cols" },
-        r.facets,
+        facetsBox,
         h("section", { class: "w-results" },
           h("div", { class: "w-toolbar" },
+            r.filterBtn,
             h("input", { type: "search", placeholder: "Filtrer : interprète, orchestre, label, lieu…", value: S.text,
               oninput: (e) => { S.text = e.target.value; S.shown = PAGE; patchWork(r); } }),
             h("span", { class: "select" }, h("select", { onchange: (e) => { S.sort = e.target.value; patchWork(r); } },
@@ -521,6 +529,8 @@ window.__dzWorks = function createWorks(ctx) {
           S.open[k] ? "moins" : `+ ${items.length - 6} autres`) : "");
     }));
 
+    const active = Object.values(S.sel).reduce((n, set) => n + (set?.size || 0), 0);
+    r.filterBtn.textContent = active ? `Filtres (${active})` : "Filtres";
     const list = sorted(filtered(all));
     requestEnrich(list);
     r.count.textContent = `${list.length} résultat${list.length > 1 ? "s" : ""}`;
@@ -537,11 +547,16 @@ window.__dzWorks = function createWorks(ctx) {
     els.forEach((el, i) => { if (parent.children[i] !== el) parent.insertBefore(el, parent.children[i] || null); });
   }
 
+  const pct = (dev) => {
+    const p = Math.round(dev * 100);
+    return p === 0 ? "0 %" : `${p > 0 ? "+" : "−"}${Math.abs(p)} %`;
+  };
+
   function cardFor({ e, d }) {
     let el = cards.get(e.id);
     if (!el) { el = card(e, d); cards.set(e.id, el); }
     // Durée et écart à la médiane : mis à jour sans reconstruire la carte.
-    const txt = d.dur ? `⏱ ${S.mov === "all" ? "" : `${ROM[S.mov] || S.mov}. `}${fmtDur(d.dur)}${d.dev != null ? ` · ${d.dev > 0 ? "+" : "−"}${Math.abs(Math.round(d.dev * 100))} %` : ""}` : "";
+    const txt = d.dur ? `⏱ ${S.mov === "all" ? "" : `${ROM[S.mov] || S.mov}. `}${fmtDur(d.dur)}${d.dev != null ? ` · ${pct(d.dev)}` : ""}` : "";
     if (el._dur.textContent !== txt) el._dur.textContent = txt;
     return el;
   }
@@ -554,7 +569,7 @@ window.__dzWorks = function createWorks(ctx) {
     const meta = [d.year || "", a.label].filter(Boolean).join(" · ");
     const dur = h("div", { class: "m dur" });
     const rec = d.mb ? [d.mb.live ? "Live" : "", d.mb.place ? d.mb.place.name : "", d.mb.engineers.length ? `ing. ${d.mb.engineers.join(", ")}` : ""].filter(Boolean).join(" · ") : "";
-    const el = h("a", { class: "item", href: `/${ctx.lang()}/album/${a.id}`, title: `${a.title}\n${a.contributors.join(", ")}`, onclick: (ev) => openAlbum(a.id, ev) },
+    const el = h("a", { class: "item", href: ctx.albumUrl(a.id), target: ctx.albumTarget || null, rel: ctx.albumTarget ? "noopener" : null, title: `${a.title}\n${a.contributors.join(", ")}`, onclick: (ev) => openAlbum(a.id, ev) },
       h("div", { class: "cover" }, cover, d.version[0] !== "Œuvre complète" ? h("span", { class: "w-badge" }, d.version[0] === "Extrait" ? `Extrait (${e.tracks.length}/${modeTracks})` : "Arrangement") : ""),
       h("div", { class: "t" }, a.title),
       solo.length ? h("div", { class: "a" }, solo.join(", ")) : "",

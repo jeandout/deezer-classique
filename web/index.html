@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Classique — recherche pour Deezer</title>
+  <meta name="description" content="Moteur de recherche de musique classique : compositeur, œuvre, mouvement, interprètes, tempo. Écoute dans Deezer. Projet personnel, non affilié à Deezer.">
+  <meta name="theme-color" content="#121216">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Classique">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/favicon-32.png" sizes="32x32">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <style>
+    /* Réglages propres à la page (le reste vient de styles.js). */
+    :root { --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color-scheme: dark; }
+    @media (prefers-color-scheme: light) { :root { --bg: #ffffff; --fg: #17171c; color-scheme: light; } }
+    html, body { margin: 0; height: 100%; background: var(--bg); }
+    body { -webkit-text-size-adjust: 100%; }
+    .panel.web { position: fixed; inset: 0; width: auto; display: flex; border: 0; box-shadow: none;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+    .panel.web .head { padding-top: 12px; }
+    .brand { font-weight: 800; }
+    .web-pref { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; }
+    .web-about { flex-basis: 100%; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <noscript>Cette page a besoin de JavaScript.</noscript>
+  <!-- Couche d'imitation des API Chrome, puis le code partagé avec l'extension. -->
+  <script src="shim.js"></script>
+  <script src="styles.js"></script>
+  <script src="background.js"></script>
+  <script src="bg-works.js"></script>
+  <script src="works.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

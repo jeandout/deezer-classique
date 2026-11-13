@@ -159,14 +159,17 @@ function normTitle(s) {
   return t.replace(/\s+/g, " ").trim();
 }
 
-const CATALOG_RE = /\b(op|k|bwv|d|hob|rv|hwv|s|wq|l|sz|bb|woo|trv|jw|fs|m|h|b|z|g)\s?([ivx]+\s)?(\d+[a-z]?)(?:\s(?:no)\s?(\d+))?/;
+// Catalogues : opus, Köchel, BWV (Bach), WWV (Wagner), TWV (Telemann), SWV (Schütz),
+// BuxWV, WAB (Bruckner), HWV (Haendel), RV (Vivaldi), D (Schubert), Hob (Haydn),
+// FP (Poulenc), S (Liszt), Sz/BB (Bartók), L (Debussy), M (Ravel)…
+const CATALOG_RE = /\b(op|k|bwv|wwv|twv|swv|buxwv|wab|mwv|zwv|d|hob|rv|hwv|s|wq|l|sz|bb|woo|trv|jw|fs|fp|m|h|b|z|g)\s?([ivx]+\s)?(\d+[a-z]?)(?:\s(?:no)\s?(\d+))?/;
 
 // Signature d'une œuvre Open Opus : catalogue, numéro, mots du genre.
 function workSignature(title) {
   const base = normTitle(title.replace(/["“”].*?["“”]/g, " "));
   const m = base.match(CATALOG_RE);
   const catalog = m ? `${m[1]} ${m[3]}${m[4] ? ` no ${m[4]}` : ""}` : "";
-  const head = base.split(/\b(?:in [a-g](?: flat| sharp)? (?:major|minor)|(?:op|k|bwv|d|hob|rv|hwv|s|woo) ?\d+)\b/)[0];
+  const head = base.split(/\b(?:in [a-g](?: flat| sharp)? (?:major|minor)|(?:op|k|bwv|wwv|twv|swv|buxwv|wab|d|hob|rv|hwv|s|woo|fp) ?\d+)\b/)[0];
   const num = (head.match(/\bno (\d+)\b/) || [])[1] || "";
   const words = head.replace(/\bno \d+\b/g, " ").split(" ")
     .filter((w) => w.length > 2 && !["for", "and", "the", "with"].includes(w)).slice(0, 4);
@@ -196,6 +199,9 @@ function matchesWork(sig, trackTitle) {
   if (!sig.words.length) return false;
   if (!sig.words.every((w) => t.includes(` ${w} `) || t.includes(` ${w}s `))) return false;
   if (sig.num && !new RegExp(`\\bno ?${sig.num}\\b`).test(t)) return false;
+  // Œuvre sans numéro (« Symphony in C major ») : la tonalité doit figurer dans le titre,
+  // sinon n'importe quelle « Symphony » correspondrait.
+  if (!sig.num && sig.key && !k) return false;
   return true;
 }
 
@@ -230,11 +236,22 @@ async function dzAlbumFull(id) {
 
 // Une piste appartient à l'œuvre si son titre le dit. Le titre de l'album ne sert
 // que pour les pistes qui ne nomment aucune œuvre (« I. Moderato »).
+// Noms d'orchestres et de salles à ignorer dans un titre d'album
+// (« Chicago Symphony Orchestra plays Wagner » ne parle pas d'une symphonie).
+const ENSEMBLE_WORDS_RE = /\b(symphony|symphonic|philharmonic|chamber|radio|festival|youth)\s+(orchestra|orchestre|band|hall|choir|chorus)\b|\b(sinfonieorchester|symphonieorchester|orchestre symphonique|orchestre philharmonique|orchestra sinfonica)\b/g;
+// Titre d'une piste qui ne nomme qu'un mouvement : « I. Allegro », « 2. Adagio », « Finale »…
+const MOVEMENT_ONLY_RE = /^\s*(?:[ivx]{1,4}|\d{1,2})[.)]\s|^\s*(allegro|andante|adagio|presto|largo|lento|moderato|vivace|scherzo|finale|menuet|minuet|rondo|intermezzo|larghetto|grave|maestoso|allegretto|andantino|aria|variatio\w*|var|gigue|sarabande|courante|allemande|bourree|bourrée|gavotte|chaconne|ciaccona|passacaglia|toccata|prelude|praeludium|fuga|fugue|kyrie|gloria|credo|sanctus|benedictus|agnus|introitus|offertorium|recitativo|recitative|coro|chorus|chorale|choral|sinfonia|ouverture|overture)\b/i;
+
 function trackMatches(sig, title, albumTitle) {
   if (matchesWork(sig, title)) return true;
   const t = ` ${normTitle(title)} `;
   if (CATALOG_RE.test(t.trim()) || sig.words.some((w) => t.includes(` ${w}`))) return false;
-  return matchesWork(sig, `${title} ${albumTitle}`);
+  // Piste sans nom d'œuvre : on s'appuie sur le titre de l'album, seulement si
+  // la piste ressemble à un mouvement.
+  const tail = title.split(/\s[:\-–]\s|:\s/).pop();
+  if (!MOVEMENT_ONLY_RE.test(tail)) return false;
+  const album = normTitle(albumTitle).replace(ENSEMBLE_WORDS_RE, " ");
+  return matchesWork(sig, `${title} ${album}`);
 }
 
 const ARRANGEMENT_RE = /\b(arr|arranged|arrangement|transcr|transcription|lofi|lo fi|excerpt|extrait|auszug|version for|remix|chill)\b/i;
@@ -249,7 +266,7 @@ function queriesFor(composer, work, sig) {
 }
 
 async function searchWork(composer, work, send, isCancelled) {
-  const key = `ws2:${work.id}`;
+  const key = `ws5:${work.id}`;
   const hit = await cacheGet(key, TTL.workSearch);
   if (hit) {
     send({ kind: "entries", entries: hit.entries });

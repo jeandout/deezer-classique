@@ -23,6 +23,7 @@
         "https://www.deezer.com/*"
       ],
       "js": [
+        "styles.js",
         "works.js",
         "content.js"
       ],
