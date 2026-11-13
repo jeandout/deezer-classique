@@ -41,21 +41,78 @@ window.__dzWorks = function createWorks(ctx) {
 
   // --- État -------------------------------------------------------------------
   const S = {
-    view: "home",                // home | composer | work
+    view: "home",                // home | composer | work | omni | epoch | artist
     q: "", results: null, searching: false, popular: null,
+    workHits: null, artistHits: null,           // recherche unique : œuvres et interprètes
+    omni: null,                                 // œuvres d'un type, tous compositeurs { q, label, results, next, loading }
+    epoch: null,                                // { id, label, composers }
+    artist: null,                               // discographie d'un interprète
     composer: null, works: null, wf: { text: "", genre: "all", form: null, instrument: null, popularOnly: false },
     work: null, entries: new Map(), enrich: new Map(), progress: null, done: false, error: null, cachedAt: null,
     sel: {}, open: {}, sort: "popular", text: "", shown: PAGE,
     mov: "all",                  // durée prise en compte pour le tempo : "all" ou n° de mouvement
   };
   let port = null, requested = new Set(), lastPrio = "", cards = new Map();
+  let artistPort = null, artistCards = new Map();
   let container = null, refs = null, builtKey = "";
 
   // --- Navigation -------------------------------------------------------------
   function go(view, patch = {}) {
     Object.assign(S, patch, { view });
     if (view !== "work" && port) { port.disconnect(); port = null; }
+    if (view !== "artist" && artistPort) { artistPort.disconnect(); artistPort = null; }
     schedule(true);
+  }
+
+  // Œuvre choisie depuis une autre page (recherche, type d'œuvre, interprète).
+  function openWorkOf(composer, work) {
+    S.composer = composer;
+    S.works = null;
+    openWork(work);
+  }
+
+  // Œuvres d'un type, tous compositeurs (« concerto pour violon »…).
+  async function openOmni(q, label) {
+    go("omni", { omni: { q, label: label || `« ${q} »`, results: [], next: 0, loading: false } });
+    await moreOmni();
+  }
+  async function moreOmni() {
+    const o = S.omni;
+    if (!o || o.loading || o.next == null) return;
+    o.loading = true; schedule();
+    try {
+      const d = await call("ooOmni", { q: o.q, offset: o.next });
+      if (S.omni !== o) return;
+      o.results.push(...d.results);
+      o.next = d.next;
+    } catch (e) { o.error = e.message; }
+    o.loading = false; schedule();
+  }
+
+  async function openEpoch(id, label) {
+    go("epoch", { epoch: { id, label, composers: null } });
+    try { S.epoch.composers = await call("ooEpoch", { epoch: id }); } catch (e) { S.epoch.error = e.message; }
+    schedule();
+  }
+
+  // Discographie d'un interprète, analysée album par album.
+  function openArtist(a) {
+    if (artistPort) artistPort.disconnect();
+    go("artist", { artist: { info: a, albums: new Map(), progress: null, done: false, error: null, cachedAt: null,
+      sel: {}, open: {}, sort: "recent", text: "", shown: PAGE } });
+    artistCards = new Map();
+    artistPort = chrome.runtime.connect({ name: "artist" });
+    const my = artistPort, A = S.artist;
+    my.onMessage.addListener((m) => {
+      if (my !== artistPort) return;
+      if (m.kind === "artist") A.info = { ...A.info, ...m.artist };
+      else if (m.kind === "albums") for (const al of m.albums) A.albums.set(al.id, al);
+      else if (m.kind === "progress") A.progress = m;
+      else if (m.kind === "done") { A.done = true; A.cachedAt = m.cached ? m.t : null; }
+      else if (m.kind === "error") A.error = m.error;
+      schedule();
+    });
+    my.postMessage({ cmd: "load", artistId: a.id });
   }
 
   async function openComposer(c) {
@@ -74,7 +131,8 @@ window.__dzWorks = function createWorks(ctx) {
     go("work", {
       work: w, entries: new Map(), enrich: new Map(), progress: null, done: false, error: null, cachedAt: null,
       // Par défaut, seules les versions complètes (les compilations d'extraits sont nombreuses).
-      sel: { version: new Set(["Œuvre complète"]) }, open: {}, text: "", shown: PAGE, mov: "all",
+      // Les albums douteux (IA, hors classique) sont masqués par défaut, mais comptés dans « Fiabilité ».
+      sel: { version: new Set(["Œuvre complète"]), trust: new Set(["Classique"]) }, open: {}, text: "", shown: PAGE, mov: "all",
     });
     requested = new Set(); lastPrio = ""; cards = new Map();
     port = chrome.runtime.connect({ name: "works" });
@@ -95,7 +153,7 @@ window.__dzWorks = function createWorks(ctx) {
   function onSearchInput(v) {
     S.q = v;
     clearTimeout(searchTimer);
-    if (v.trim().length < 3) { S.results = null; schedule(); return; }
+    if (v.trim().length < 3) { S.results = null; S.workHits = null; S.artistHits = null; schedule(); return; }
     // Deux sources en parallèle : Open Opus (rapide, compositeurs principaux)
     // puis MusicBrainz (tous les autres, tolère les fautes de frappe).
     searchTimer = setTimeout(async () => {
@@ -108,9 +166,13 @@ window.__dzWorks = function createWorks(ctx) {
         S.results = [...S.results, ...list.filter((c) => !seen.has(key(c)))];
         schedule();
       };
+      S.workHits = null; S.artistHits = null;
       const oo = call("ooComposerSearch", { q: v }).then(merge).catch(() => {});
       const mbz = call("mbComposerSearch", { q: v }).then(merge).catch(() => {});
-      await Promise.all([oo, mbz]);
+      // Œuvres de tous les compositeurs et interprètes, en même temps.
+      const works = call("ooOmni", { q: v }).then((d) => { if (S.searchToken === token) { S.workHits = d.results; schedule(); } }).catch(() => {});
+      const artists = call("dzArtistSearch", { q: v }).then((d) => { if (S.searchToken === token) { S.artistHits = d; schedule(); } }).catch(() => {});
+      await Promise.all([oo, mbz, works, artists]);
       if (S.searchToken === token) { S.searching = false; schedule(); }
     }, 350);
   }
@@ -238,6 +300,7 @@ window.__dzWorks = function createWorks(ctx) {
       engineers: mb ? mb.engineers : [],
       producers: mb ? mb.producers : [],
       version: [e.arrangement ? "Arrangement / adaptation" : e.tracks.length >= modeTracks ? "Œuvre complète" : "Extrait"],
+      trust: [e.suspect?.length ? "Douteux (IA, hors classique…)" : "Classique"],
       mb,
     };
   }
@@ -246,7 +309,7 @@ window.__dzWorks = function createWorks(ctx) {
     ["tempo", "Tempo"], ["soloists", "Soliste / interprète"], ["ensembles", "Orchestre / ensemble"], ["conductors", "Chef"],
     ["label", "Label"], ["decade", "Décennie"], ["live", "Live / studio"], ["placeType", "Type de lieu"],
     ["place", "Lieu d'enregistrement"], ["engineers", "Ingénieur du son"], ["producers", "Directeur artistique"],
-    ["version", "Version"],
+    ["version", "Version"], ["trust", "Fiabilité"],
   ];
 
   function computeModeTracks() {
@@ -304,14 +367,21 @@ window.__dzWorks = function createWorks(ctx) {
   // les listes ne sont pas reconstruites et le défilement n'est jamais touché.
   function render(el) {
     container = el;
-    const key = S.view === "work" ? `work:${S.work?.id}` : S.view === "composer" ? `composer:${S.composer?.id}` : "home";
+    const key = {
+      work: () => `work:${S.work?.id}`, composer: () => `composer:${S.composer?.id}`, omni: () => `omni:${S.omni?.q}`,
+      epoch: () => `epoch:${S.epoch?.id}`, artist: () => `artist:${S.artist?.info?.id}`, home: () => "home",
+    }[S.view]();
+    const views = {
+      home: [buildHome, patchHome], composer: [buildComposer, patchComposer], work: [buildWork, patchWork],
+      omni: [buildOmni, patchOmni], epoch: [buildEpoch, patchEpoch], artist: [buildArtist, patchArtist],
+    };
     if (key !== builtKey || !refs || !container.contains(refs.root)) {
       builtKey = key;
       refs = { root: h("div", { class: "w-root" }) };
-      ({ home: buildHome, composer: buildComposer, work: buildWork })[S.view](refs);
+      views[S.view][0](refs);
       container.replaceChildren(refs.root);
     }
-    ({ home: patchHome, composer: patchComposer, work: patchWork })[S.view](refs);
+    views[S.view][1](refs);
   }
 
   function crumbs(...items) {
@@ -321,14 +391,33 @@ window.__dzWorks = function createWorks(ctx) {
     ]));
   }
 
-  // Accueil : recherche de compositeur + compositeurs populaires.
+  // --- Accueil : recherche unique (compositeurs, œuvres, interprètes) + raccourcis ---
+  const TYPE_SHORTCUTS = [
+    ["Concertos pour piano", "piano concerto"], ["Concertos pour violon", "violin concerto"],
+    ["Concertos pour violoncelle", "cello concerto"], ["Symphonies", "symphony"], ["Quatuors à cordes", "string quartet"],
+    ["Sonates pour piano", "piano sonata"], ["Sonates pour violon", "violin sonata"], ["Trios avec piano", "piano trio"],
+    ["Quintettes", "quintet"], ["Requiem", "requiem"], ["Messes", "missa"], ["Opéras", "opera"], ["Ballets", "ballet"],
+    ["Préludes", "prelude"], ["Nocturnes", "nocturne"], ["Variations", "variations"], ["Cantates", "cantata"],
+  ];
+  const EPOCHS = [
+    ["Medieval", "Médiéval"], ["Renaissance", "Renaissance"], ["Baroque", "Baroque"], ["Classical", "Classique"],
+    ["Early Romantic", "Premier romantisme"], ["Romantic", "Romantique"], ["Late Romantic", "Romantisme tardif"],
+    ["20th Century", "XXᵉ siècle"], ["Post-War", "Après-guerre"], ["21st Century", "XXIᵉ siècle"],
+  ];
+  const EPOCH_FR = Object.fromEntries(EPOCHS);
+
   function buildHome(r) {
-    r.results = h("div", { class: "w-composers" });
+    r.results = h("div", { class: "w-sections" });
     r.popular = h("div", { class: "w-composers" });
     r.root.append(h("div", { class: "w-scroll" },
-      h("h2", {}, "Rechercher un compositeur"),
-      h("input", { type: "search", class: "w-big", placeholder: "Rachmaninov, Bach, Debussy…", value: S.q, oninput: (e) => onSearchInput(e.target.value) }),
+      h("h2", {}, "Rechercher"),
+      h("input", { type: "search", class: "w-big", placeholder: "Compositeur, œuvre ou interprète : Rachmaninov, concerto pour violon, Trifonov…",
+        value: S.q, oninput: (e) => onSearchInput(e.target.value) }),
       r.results,
+      h("h3", {}, "Par type d'œuvre"),
+      h("div", { class: "chips" }, TYPE_SHORTCUTS.map(([label, q]) => h("button", { class: "chip", onclick: () => openOmni(q, label) }, label))),
+      h("h3", {}, "Par époque"),
+      h("div", { class: "chips" }, EPOCHS.map(([id, label]) => h("button", { class: "chip", onclick: () => openEpoch(id, label) }, label))),
       h("h3", {}, "Compositeurs populaires"),
       r.popular,
       // Réglages propres à l'extension ou à l'application web.
@@ -344,15 +433,68 @@ window.__dzWorks = function createWorks(ctx) {
     return h("button", { class: "w-composer", onclick: () => openComposer(c) },
       c.portrait ? img : h("div", { class: "ph" }, (c.name || "?")[0]),
       h("div", {}, h("div", { class: "strong" }, c.complete_name || c.name),
-        h("div", { class: "muted small" }, [c.birth && `${c.birth}–${c.death || ""}`, c.epoch, c.source === "mb" ? "MusicBrainz" : ""].filter(Boolean).join(" · "))));
+        h("div", { class: "muted small" }, [c.birth && `${c.birth}–${c.death || ""}`, EPOCH_FR[c.epoch] || c.epoch, c.source === "mb" ? "MusicBrainz" : ""].filter(Boolean).join(" · "))));
+  }
+  function artistCard(a) {
+    const img = h("img", { src: a.picture, alt: "", loading: "lazy" });
+    img.addEventListener("error", () => img.replaceWith(h("div", { class: "ph" }, (a.name || "?")[0])));
+    return h("button", { class: "w-composer", onclick: () => openArtist(a) },
+      a.picture ? img : h("div", { class: "ph" }, (a.name || "?")[0]),
+      h("div", {}, h("div", { class: "strong" }, a.name),
+        h("div", { class: "muted small" }, `${a.nbAlbums} album${a.nbAlbums > 1 ? "s" : ""} sur Deezer`)));
+  }
+  function workRow(c, w) {
+    return h("button", { class: "w-work", onclick: () => openWorkOf(c, w) },
+      h("div", {}, h("div", { class: "strong" }, w.title, w.popular ? h("span", { class: "star", title: "Œuvre populaire (selon Open Opus)" }, " ★") : ""),
+        h("div", { class: "muted small" }, c.complete_name || c.name, w.subtitle ? ` · ${w.subtitle}` : "")),
+      w.genre ? h("span", { class: "tag" }, GENRES[w.genre] || w.genre) : "");
   }
   function patchHome(r) {
+    const searching = Array.isArray(S.results);
+    const section = (title, body, more) => h("section", { class: "w-section" }, h("div", { class: "w-section-head" }, h("h3", {}, title), more || ""), body);
     r.results.replaceChildren(...[
-      Array.isArray(S.results) ? S.results.map(composerCard) : "",
-      S.searching ? h("div", { class: "muted small" }, S.results?.length ? "Recherche dans MusicBrainz…" : "Recherche…") : "",
-      !S.searching && Array.isArray(S.results) && !S.results.length ? h("div", { class: "muted" }, "Aucun compositeur trouvé.") : "",
+      searching && S.results.length ? section("Compositeurs", h("div", { class: "w-composers" }, S.results.map(composerCard))) : "",
+      searching && S.workHits?.length ? section("Œuvres", h("div", { class: "w-works" }, S.workHits.slice(0, 8).map((x) => workRow(x.composer, x.work))),
+        S.workHits.length > 8 || S.workHits.length === 20 ? h("button", { class: "link small", onclick: () => openOmni(S.q.trim()) }, "toutes les œuvres →") : "") : "",
+      searching && S.artistHits?.length ? section("Interprètes", h("div", { class: "w-composers" }, S.artistHits.slice(0, 6).map(artistCard))) : "",
+      S.searching ? h("div", { class: "muted small" }, "Recherche…") : "",
+      searching && !S.searching && !S.results.length && !S.workHits?.length && !S.artistHits?.length ? h("div", { class: "muted" }, "Aucun résultat.") : "",
     ].flat());
     if (r.popular.childElementCount !== (S.popular || []).length) r.popular.replaceChildren(...(S.popular || []).map(composerCard));
+  }
+
+  // --- Œuvres d'un type, tous compositeurs ---------------------------------------
+  function buildOmni(r) {
+    r.list = h("div", { class: "w-works" });
+    r.tail = h("div", { class: "tail" });
+    r.root.append(h("div", { class: "w-scroll" },
+      crumbs({ label: "Accueil", onclick: () => go("home") }, { label: S.omni.label }),
+      h("h2", {}, S.omni.label),
+      h("div", { class: "muted small" }, "Œuvres de tous les compositeurs d'Open Opus. Choisissez une œuvre pour voir ses enregistrements."),
+      r.list, r.tail));
+  }
+  function patchOmni(r) {
+    const o = S.omni;
+    if (r.list.childElementCount !== o.results.length) r.list.replaceChildren(...o.results.map((x) => workRow(x.composer, x.work)));
+    r.tail.replaceChildren(
+      o.error ? h("div", { class: "error" }, o.error) : "",
+      o.loading ? h("div", { class: "muted" }, "Chargement…") : "",
+      !o.loading && !o.results.length ? h("div", { class: "muted empty" }, "Aucune œuvre trouvée.") : "",
+      !o.loading && o.next != null ? h("button", { class: "btn more", onclick: moreOmni }, "Plus d'œuvres") : "");
+  }
+
+  // --- Compositeurs d'une époque -------------------------------------------------
+  function buildEpoch(r) {
+    r.list = h("div", { class: "w-composers" });
+    r.root.append(h("div", { class: "w-scroll" },
+      crumbs({ label: "Accueil", onclick: () => go("home") }, { label: S.epoch.label }),
+      h("h2", {}, S.epoch.label), r.list));
+  }
+  function patchEpoch(r) {
+    const e = S.epoch;
+    if (e.error) r.list.replaceChildren(h("div", { class: "error" }, e.error));
+    else if (!e.composers) r.list.replaceChildren(h("div", { class: "muted" }, "Chargement…"));
+    else if (r.list.childElementCount !== e.composers.length) r.list.replaceChildren(...e.composers.map(composerCard));
   }
 
   // Compositeur : liste de ses œuvres, filtrable par genre, forme, instrument.
@@ -362,7 +504,7 @@ window.__dzWorks = function createWorks(ctx) {
     r.list = h("div", { class: "w-works" });
     r.count = h("span", { class: "muted small" });
     r.root.append(h("div", { class: "w-scroll" },
-      crumbs({ label: "Compositeurs", onclick: () => go("home") }, { label: c.complete_name || c.name }),
+      crumbs({ label: "Accueil", onclick: () => go("home") }, { label: c.complete_name || c.name }),
       h("div", { class: "w-composer-head" },
         c.portrait ? h("img", { src: c.portrait, alt: "" }) : null,
         h("div", {}, h("h2", {}, c.complete_name || c.name),
@@ -432,7 +574,7 @@ window.__dzWorks = function createWorks(ctx) {
     r.count = h("span", { class: "muted small" });
     r.root.append(
       h("div", { class: "w-workhead" },
-        crumbs({ label: "Compositeurs", onclick: () => go("home") }, { label: c.complete_name || c.name, onclick: () => go("composer") }, { label: w.title }),
+        crumbs({ label: "Accueil", onclick: () => go("home") }, { label: c.complete_name || c.name, onclick: () => (S.works ? go("composer") : openComposer(c)) }, { label: w.title }),
         h("h2", {}, w.title), r.movs = h("div", { class: "w-movs" }), r.status),
       h("div", { class: "w-cols" },
         facetsBox,
@@ -570,15 +712,150 @@ window.__dzWorks = function createWorks(ctx) {
     const dur = h("div", { class: "m dur" });
     const rec = d.mb ? [d.mb.live ? "Live" : "", d.mb.place ? d.mb.place.name : "", d.mb.engineers.length ? `ing. ${d.mb.engineers.join(", ")}` : ""].filter(Boolean).join(" · ") : "";
     const el = h("a", { class: "item", href: ctx.albumUrl(a.id), target: ctx.albumTarget || null, rel: ctx.albumTarget ? "noopener" : null, title: `${a.title}\n${a.contributors.join(", ")}`, onclick: (ev) => openAlbum(a.id, ev) },
-      h("div", { class: "cover" }, cover, d.version[0] !== "Œuvre complète" ? h("span", { class: "w-badge" }, d.version[0] === "Extrait" ? `Extrait (${e.tracks.length}/${modeTracks})` : "Arrangement") : ""),
+      h("div", { class: "cover" }, cover, e.suspect?.length
+        ? h("span", { class: "w-badge warn", title: `Album douteux : ${e.suspect.join(" · ")}` }, "Douteux")
+        : d.version[0] !== "Œuvre complète" ? h("span", { class: "w-badge" }, d.version[0] === "Extrait" ? `Extrait (${e.tracks.length}/${modeTracks})` : "Arrangement") : ""),
       h("div", { class: "t" }, a.title),
       solo.length ? h("div", { class: "a" }, solo.join(", ")) : "",
       line2 ? h("div", { class: "a" }, line2) : "",
       h("div", { class: "m" }, meta),
       rec ? h("div", { class: "m rec" }, rec) : "",
+      e.suspect?.length ? h("div", { class: "m warn" }, `⚠ ${e.suspect.join(" · ")}`) : "",
       dur);
     el._dur = dur;
     return el;
+  }
+
+  // --- Interprète : discographie analysée, filtrable --------------------------------
+  const RECORD_TYPES = { album: "Album", single: "Single", ep: "EP", compile: "Compilation" };
+
+  function deriveAlbum(al) {
+    const y = parseInt((al.album.date || "").slice(0, 4), 10);
+    const works = al.works || [];
+    return {
+      composer: [...new Set(works.map((w) => w.composer?.complete_name || w.composerName).filter(Boolean))],
+      genre: [...new Set(works.map((w) => w.work?.genre).filter(Boolean).map((g) => GENRES[g] || g))],
+      form: [...new Set(works.flatMap((w) => titleTags(w.title, FORMS)))],
+      decade: y ? [`Années ${Math.floor(y / 10) * 10}`] : [],
+      label: al.album.label ? [al.album.label] : [],
+      type: [RECORD_TYPES[al.album.recordType] || "Album"],
+      year: y || 0,
+    };
+  }
+  const ARTIST_FACETS = [["composer", "Compositeur"], ["genre", "Genre"], ["form", "Forme"], ["decade", "Décennie"], ["label", "Label"], ["type", "Type d'album"]];
+
+  function buildArtist(r) {
+    const A = S.artist;
+    r.status = h("div", { class: "w-status" });
+    r.facets = h("div", { class: "w-facets-body" });
+    r.grid = h("div", { class: "w-albums" });
+    r.tail = h("div", { class: "tail" });
+    r.count = h("span", { class: "muted small" });
+    r.head = h("div", { class: "w-composer-head" });
+    r.filterBtn = h("button", { class: "btn w-filter-btn", onclick: () => r.root.classList.add("show-filters") }, "Filtres");
+    r.root.append(
+      h("div", { class: "w-workhead" },
+        crumbs({ label: "Accueil", onclick: () => go("home") }, { label: A.info.name }), r.head, r.status),
+      h("div", { class: "w-cols" },
+        h("aside", { class: "w-facets" },
+          h("div", { class: "w-facets-head" }, h("span", { class: "strong" }, "Filtres"),
+            h("button", { class: "btn primary", onclick: () => r.root.classList.remove("show-filters") }, "Voir les résultats")),
+          r.facets),
+        h("section", { class: "w-results" },
+          h("div", { class: "w-toolbar" },
+            r.filterBtn,
+            h("input", { type: "search", placeholder: "Filtrer : œuvre, compositeur, album…", value: A.text,
+              oninput: (e) => { A.text = e.target.value; A.shown = PAGE; patchArtist(r); } }),
+            h("span", { class: "select" }, h("select", { onchange: (e) => { A.sort = e.target.value; patchArtist(r); } },
+              [["recent", "Plus récents"], ["old", "Plus anciens"], ["popular", "Popularité"], ["title", "Titre"]]
+                .map(([v, t]) => h("option", { value: v, selected: A.sort === v }, t)))),
+            r.count),
+          r.grid, r.tail)));
+  }
+
+  function patchArtist(r) {
+    const A = S.artist, info = A.info;
+    const headKey = `${info.name}|${info.picture}|${info.nbAlbums}`;
+    if (r.head.dataset.key !== headKey) {
+      r.head.dataset.key = headKey;
+      const img = info.picture ? h("img", { src: info.picture, alt: "" }) : "";
+      r.head.replaceChildren(img, h("div", {}, h("h2", {}, info.name),
+        h("div", { class: "muted" }, `${info.nbAlbums || "?"} albums sur Deezer`)));
+    }
+    const all = [...A.albums.values()].map((al) => ({ al, d: deriveAlbum(al) }));
+    const p = A.progress;
+    const nWorks = all.reduce((n, { al }) => n + al.works.length, 0);
+    const bar = h("div", { class: "bar" }, h("div"));
+    bar.firstChild.style.width = `${Math.round(100 * Math.min(1, p ? p.done / Math.max(1, p.total) : 0))}%`;
+    r.status.replaceChildren(h("div", { class: "muted small" },
+      A.done ? `${all.length} albums analysés · ${nWorks} œuvres` : `Analyse de la discographie… ${p ? (p.phase === "list" ? "liste des albums" : `${p.done}/${p.total} albums`) : ""}`,
+      A.cachedAt ? ` · du ${new Date(A.cachedAt).toLocaleDateString()}` : ""),
+      A.error ? h("div", { class: "error" }, A.error) : "", !A.done ? bar : "");
+
+    const q = norm(A.text);
+    const pass = ({ al, d }, except) => {
+      if (q && !norm(`${al.album.title} ${al.works.map((w) => `${w.title} ${w.composerName}`).join(" ")}`).includes(q)) return false;
+      for (const [k] of ARTIST_FACETS) {
+        if (k === except) continue;
+        const sel = A.sel[k];
+        if (sel?.size && !d[k].some((v) => sel.has(v))) return false;
+      }
+      return true;
+    };
+    r.facets.replaceChildren(...ARTIST_FACETS.map(([k, label]) => {
+      const counts = new Map();
+      for (const x of all) if (pass(x, k)) for (const v of x.d[k]) counts.set(v, (counts.get(v) || 0) + 1);
+      const sel = A.sel[k] || new Set();
+      for (const v of sel) if (!counts.has(v)) counts.set(v, 0);
+      if (!counts.size) return "";
+      const items = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      const limit = A.open[k] ? items.length : 8;
+      return h("div", { class: "w-facet" },
+        h("div", { class: "w-facet-title" }, label, sel.size ? h("button", { class: "link small", onclick: () => { A.sel[k] = new Set(); A.shown = PAGE; patchArtist(r); } }, "effacer") : ""),
+        items.filter(([v], i) => i < limit || sel.has(v)).map(([v, n]) => h("label", { class: `w-opt${sel.has(v) ? " on" : ""}` },
+          h("input", { type: "checkbox", checked: sel.has(v), onchange: (e) => {
+            const set = A.sel[k] || (A.sel[k] = new Set());
+            e.target.checked ? set.add(v) : set.delete(v);
+            A.shown = PAGE;
+            patchArtist(r);
+          } }),
+          h("span", { class: "v" }, v), h("span", { class: "n" }, n))),
+        items.length > 8 ? h("button", { class: "link small", onclick: () => { A.open[k] = !A.open[k]; patchArtist(r); } }, A.open[k] ? "moins" : `+ ${items.length - 8} autres`) : "");
+    }));
+
+    const by = {
+      recent: (a, b) => b.d.year - a.d.year, old: (a, b) => (a.d.year || 9999) - (b.d.year || 9999),
+      popular: (a, b) => b.al.album.fans - a.al.album.fans, title: (a, b) => a.al.album.title.localeCompare(b.al.album.title),
+    };
+    const list = all.filter((x) => pass(x)).sort(by[A.sort] || by.recent);
+    const active = Object.values(A.sel).reduce((n, set) => n + (set?.size || 0), 0);
+    r.filterBtn.textContent = active ? `Filtres (${active})` : "Filtres";
+    r.count.textContent = `${list.length} album${list.length > 1 ? "s" : ""}`;
+    const visible = list.slice(0, A.shown);
+    reconcile(r.grid, visible.map(({ al }) => artistCards.get(al.id) || (artistCards.set(al.id, albumCard(al)), artistCards.get(al.id))));
+    r.tail.replaceChildren(
+      !visible.length && A.done ? h("div", { class: "muted empty" }, "Aucun album ne correspond.") : "",
+      list.length > A.shown ? h("button", { class: "btn more", onclick: () => { A.shown += PAGE; patchArtist(r); } }, `Afficher plus (${list.length - A.shown} restants)`) : "");
+  }
+
+  // Carte d'album : pochette et titre ouvrent l'album dans Deezer ; chaque œuvre
+  // reconnue ouvre la page de ses enregistrements.
+  function albumCard(al) {
+    const a = al.album;
+    const link = (child, cls) => h("a", { class: cls, href: ctx.albumUrl(a.id), target: ctx.albumTarget || null, rel: ctx.albumTarget ? "noopener" : null, onclick: (ev) => openAlbum(a.id, ev) }, child);
+    const y = (a.date || "").slice(0, 4);
+    const works = al.works.slice(0, 6);
+    return h("div", { class: "w-album" },
+      link(h("div", { class: "cover" }, a.cover ? h("img", { src: a.cover, alt: "", loading: "lazy" }) : h("div", { class: "ph" }, (a.title || "?")[0])), "w-album-cover"),
+      h("div", { class: "w-album-body" },
+        link(a.title, "t"),
+        h("div", { class: "m" }, [y, a.label, RECORD_TYPES[a.recordType] && a.recordType !== "album" ? RECORD_TYPES[a.recordType] : ""].filter(Boolean).join(" · ")),
+        h("ul", { class: "w-album-works" }, works.map((w) => {
+          const label = [w.composer?.name || w.composerName, w.title].filter(Boolean).join(" — ");
+          return h("li", {}, w.work && w.composer
+            ? h("button", { class: "link", title: "Voir tous les enregistrements de cette œuvre", onclick: () => openWorkOf(w.composer, w.work) }, label)
+            : h("span", { class: "muted" }, label));
+        }), al.works.length > works.length ? h("li", { class: "muted small" }, `+ ${al.works.length - works.length} autres`) : "")));
   }
 
   return {

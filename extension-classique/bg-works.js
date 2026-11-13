@@ -216,12 +216,14 @@ function compactAlbumFull(a) {
     id: a.id, title: a.title, cover: a.cover_medium || "", label: a.label || "", upc: a.upc || "",
     date: a.release_date || "", fans: a.fans || 0, nbTracks: a.nb_tracks || 0, recordType: a.record_type || "",
     contributors: (a.contributors || []).map((c) => c.name),
+    genres: (a.genres?.data || []).map((g) => ({ id: g.id, name: g.name })),
+    artistId: a.artist?.id || 0, artistName: a.artist?.name || "",
     tracks: (a.tracks?.data || []).map((t) => ({ id: t.id, title: t.title, duration: t.duration || 0, rank: t.rank || 0 })),
   };
 }
 
 async function dzAlbumFull(id) {
-  return cached(`dzA2:${id}`, TTL.dzAlbumFull, async () => {
+  return cached(`dzA3:${id}`, TTL.dzAlbumFull, async () => {
     const a = await dz(`/album/${id}`);
     if (!a || !a.id) return null;
     const out = compactAlbumFull(a);
@@ -254,6 +256,51 @@ function trackMatches(sig, title, albumTitle) {
   return matchesWork(sig, `${title} ${album}`);
 }
 
+// --- Albums douteux (générés par IA, hors classique…) ------------------------------
+// Trois signaux prudents, testés pour ne pas écarter de vrais enregistrements :
+// 1) genre Deezer renseigné mais non classique (un album sans genre, une bande
+//    originale ou un opéra ne comptent pas) ;
+// 2) mots de style dans les titres (synthwave, lo-fi, sleep…) ;
+// 3) artiste « usine à albums » : au moins 20 albums, tous parus en moins de deux
+//    ans (un vrai interprète a un fonds ancien ; les labels qui numérisent leur
+//    catalogue publient beaucoup d'un coup, mais avec des parutions anciennes).
+//    Jamais appliqué à un compositeur (page Deezer de Bach) ni à « Various Artists ».
+const CLASSICAL_GENRE_RE = /classi|film|movie|soundtrack|game|opera|opéra|vocal|choral|baroque|christ|chrét|gospel|relig|sacr/i;
+const STYLE_RE = /\b(synthwave|synth wave|lofi|lo fi|lo-fi|chill|chillout|relax|relaxing|sleep|sleeping|study|studying|meditation|ambient|spa|yoga|focus|lullaby|lullabies|babies|baby|8 bit|8-bit|trap|phonk|edm|techno|remix|epic|cinematic|beats|vibes|slowed|reverb|nightcore|aesthetic)\b/i;
+TTL.burst = 30 * DAY;
+
+// Taille du catalogue d'un artiste et date de sa plus ancienne parution.
+async function artistCatalogue(artistId) {
+  if (!artistId) return null;
+  return cached(`artcat:${artistId}`, TTL.burst, async () => {
+    const first = await dz(`/artist/${artistId}/albums?limit=100`);
+    let items = first.data || [];
+    const total = first.total || items.length;
+    if (total > items.length) {
+      const last = await dz(`/artist/${artistId}/albums?limit=100&index=${Math.max(0, total - 100)}`);
+      items = items.concat(last.data || []);
+    }
+    const dates = items.map((x) => Date.parse(x.release_date)).filter(Boolean);
+    return { total, oldest: dates.length ? Math.min(...dates) : 0 };
+  });
+}
+
+async function suspectFlags(album, tracks) {
+  const flags = [];
+  const g = album.genres || [];
+  if (g.length && !g.some((x) => x.id === 98 || x.id === 173 || CLASSICAL_GENRE_RE.test(x.name))) flags.push(`genre ${g.map((x) => x.name).join(", ")}`);
+  const style = `${album.title} ${tracks.map((t) => t.title).join(" ")}`.match(STYLE_RE);
+  if (style) flags.push(`style « ${style[1].toLowerCase()} »`);
+  const idx = await getComposerIndex();
+  if (album.artistId && !idx.find(album.artistName) && !/^various|^divers|^verschiedene/i.test(album.artistName)) {
+    const cat = await artistCatalogue(album.artistId).catch(() => null);
+    if (cat && cat.total >= 20 && cat.oldest && Date.now() - cat.oldest < 730 * DAY) {
+      flags.push(`${album.artistName} : ${cat.total} albums, tous parus depuis ${new Date(cat.oldest).toLocaleDateString("fr-FR", { month: "long", year: "numeric" })}`);
+    }
+  }
+  return flags;
+}
+
 const ARRANGEMENT_RE = /\b(arr|arranged|arrangement|transcr|transcription|lofi|lo fi|excerpt|extrait|auszug|version for|remix|chill)\b/i;
 
 function queriesFor(composer, work, sig) {
@@ -266,7 +313,7 @@ function queriesFor(composer, work, sig) {
 }
 
 async function searchWork(composer, work, send, isCancelled) {
-  const key = `ws5:${work.id}`;
+  const key = `ws7:${work.id}`;
   const hit = await cacheGet(key, TTL.workSearch);
   if (hit) {
     send({ kind: "entries", entries: hit.entries });
@@ -319,7 +366,8 @@ async function searchWork(composer, work, send, isCancelled) {
     const all = [...fromAlbum, ...trs.filter((t) => !known.has(t.id))];
     const arrangement = all.some((t) => ARRANGEMENT_RE.test(t.title)) || ARRANGEMENT_RE.test(album.title);
     const { tracks: _drop, ...albumInfo } = album;
-    const entry = { id: String(albumId), album: albumInfo, tracks: all, arrangement, rank: Math.max(...all.map((t) => t.rank || 0)) };
+    const suspect = await suspectFlags(album, all);
+    const entry = { id: String(albumId), album: albumInfo, tracks: all, arrangement, suspect, rank: Math.max(...all.map((t) => t.rank || 0)) };
     entries.push(entry);
     send({ kind: "entries", entries: [entry] });
   }
@@ -394,13 +442,213 @@ async function enrichEntry(entry) {
   return null;
 }
 
+// --- Recherche d'œuvres tous compositeurs, époques (Open Opus) ------------------
+const compactWork = (w) => ({
+  id: w.id, title: w.title, subtitle: w.subtitle || "", genre: w.genre || "",
+  popular: w.popular === "1" || w.popular === true, recommended: w.recommended === "1" || w.recommended === true,
+});
+
+// « violin concerto », « requiem »… : œuvres de tous les compositeurs d'Open Opus,
+// par pages de 20.
+// Termes musicaux français -> anglais (les titres d'Open Opus sont en anglais).
+const FR_EN = {
+  violon: "violin", violons: "violins", violoncelle: "cello", alto: "viola", flute: "flute", hautbois: "oboe",
+  clarinette: "clarinet", basson: "bassoon", cor: "horn", trompette: "trumpet", orgue: "organ", clavecin: "harpsichord",
+  guitare: "guitar", harpe: "harp", symphonie: "symphony", symphonies: "symphony", sonate: "sonata", sonates: "sonata",
+  quatuor: "quartet", quatuors: "quartet", quintette: "quintet", sextuor: "sextet", octuor: "octet", cordes: "string",
+  messe: "mass", messes: "mass", cantate: "cantata", cantates: "cantata", opera: "opera", prelude: "prelude", preludes: "prelude",
+  etude: "etude", etudes: "etude", valse: "waltz", valses: "waltz", concertos: "concerto", ouverture: "overture",
+  mineur: "minor", majeur: "major", ut: "c", re: "d", mi: "e", fa: "f", sol: "g", si: "b", bemol: "flat", diese: "sharp",
+  chœur: "choir", choeur: "choir", poeme: "poem", danse: "dance", danses: "dances", marche: "march",
+};
+const FR_STOP = new Set(["pour", "de", "des", "du", "en", "a", "avec", "et", "le", "la", "les", "un", "une"]);
+function translateQuery(q) {
+  return norm(q).split(" ").filter((w) => w && !FR_STOP.has(w)).map((w) => FR_EN[w] || w).join(" ");
+}
+
+async function ooOmniRaw(t, offset) {
+  const d = await oo(`/omnisearch/${encodeURIComponent(t)}/${offset}.json`);
+  return {
+    results: (d.results || []).filter((x) => x.work && x.composer)
+      .map((x) => ({ composer: compactComposer(x.composer), work: compactWork(x.work) })),
+    next: d.next ?? null,
+  };
+}
+
+async function ooOmni(q, offset = 0) {
+  const t = q.trim();
+  if (t.length < 3) return { results: [], next: null };
+  return cached(`ooomni2:${norm(t)}:${offset}`, TTL.ooWorks, async () => {
+    // Requête traduite en anglais (pages suivantes), complétée par la requête
+    // d'origine sur la première page (titres en français : « Symphonie fantastique »).
+    const en = translateQuery(t);
+    const main = await ooOmniRaw(en || t, offset);
+    if (offset || !en || en === norm(t)) return main;
+    const extra = await ooOmniRaw(t, 0).catch(() => ({ results: [] }));
+    const seen = new Set(main.results.map((x) => x.work.id));
+    return { results: [...main.results, ...extra.results.filter((x) => !seen.has(x.work.id))], next: main.next };
+  });
+}
+
+async function ooEpoch(epoch) {
+  return cached(`ooepoch:${epoch}`, TTL.ooComposers, async () =>
+    ((await oo(`/composer/list/epoch/${encodeURIComponent(epoch)}.json`)).composers || []).map(compactComposer));
+}
+
+// --- Interprètes (Deezer) ---------------------------------------------------------
+async function dzArtistSearch(q) {
+  const t = q.trim();
+  if (t.length < 3) return [];
+  return cached(`dzas:${norm(t)}`, TTL.ooComposers, async () => {
+    const d = await dz(`/search/artist?q=${encodeURIComponent(t)}&limit=8`, true);
+    return (d.data || []).map((a) => ({ id: a.id, name: a.name, picture: a.picture_medium || "", nbAlbums: a.nb_album || 0, fans: a.nb_fan || 0 }));
+  });
+}
+
+// Compositeurs connus d'Open Opus, retrouvés par leur nom de famille
+// (5 premières lettres : Rachmaninoff / Rachmaninov / Rakhmaninov).
+let composerIndex = null;
+async function getComposerIndex() {
+  if (composerIndex) return composerIndex;
+  const all = await cached("ooall", TTL.ooComposers, async () =>
+    ((await oo("/composer/list/name/all.json")).composers || []).map(compactComposer));
+  // Nom exact d'abord (Schumann ≠ Schuman), puis préfixe s'il est sans ambiguïté.
+  const byLast = new Map(), byPrefix = new Map();
+  for (const c of all) {
+    const last = norm(c.name).replace(/\s/g, "");
+    byLast.set(last, c);
+    const k = last.slice(0, 5);
+    if (k.length >= 4) byPrefix.set(k, byPrefix.has(k) ? null : c);
+  }
+  const find = (name) => {
+    const words = norm(name).split(" ").filter(Boolean);
+    if (!words.length) return null;
+    const last = words[words.length - 1], joined = words.join("");
+    return byLast.get(last) || byLast.get(joined) || byPrefix.get(last.slice(0, 5)) || byPrefix.get(joined.slice(0, 5)) || null;
+  };
+  composerIndex = { find };
+  return composerIndex;
+}
+
+// « Piano Concerto No. 2 in C Minor, Op. 18 : Rachmaninoff: Piano Concerto…: I. Moderato »
+// -> { work: "Piano Concerto No. 2 in C Minor, Op. 18", composer: "Rachmaninoff" }
+function splitTrackTitle(title) {
+  const clean = (x) => x.replace(/\s*[([][^)\]]*[)\]]\s*/g, " ").replace(/\s+/g, " ").trim();
+  let work = title, composer = "";
+  const dg = title.indexOf(" : ");
+  if (dg > 0) {
+    work = title.slice(0, dg);
+    const rest = title.slice(dg + 3).split(/:\s+/);
+    if (rest.length > 1) composer = rest[0];
+  } else {
+    const segs = title.split(/:\s+/);
+    if (segs.length > 1 && segs[0].length < 40 && !/\d/.test(segs[0]) && segs[0].split(" ").length <= 4) composer = segs.shift();
+    if (segs.length > 1 && (MOVEMENT_ONLY_RE.test(segs[segs.length - 1]) || /^[ivx]{1,4}\.?\s/i.test(segs[segs.length - 1]))) segs.pop();
+    work = segs.join(": ");
+  }
+  work = work.replace(/\s*[-–]\s*(?:[ivx]{1,4}|\d{1,2})\.\s.*$/i, "");
+  return { work: clean(work), composer: clean(composer) };
+}
+
+// Œuvres d'un compositeur avec leur signature, pour retrouver une œuvre d'après un titre.
+const sigCache = new Map();
+async function worksWithSig(composerId) {
+  if (sigCache.has(composerId)) return sigCache.get(composerId);
+  const { works } = await ooWorks(composerId);
+  const list = works.map((w) => ({ w, sig: workSignature(w.title) }));
+  sigCache.set(composerId, list);
+  return list;
+}
+
+// Analyse d'un album d'un interprète : œuvres contenues, compositeur et œuvre
+// Open Opus correspondante quand on la reconnaît.
+async function analyseAlbum(album) {
+  const idx = await getComposerIndex();
+  const albumComposers = album.contributors.map((n) => idx.find(n)).filter(Boolean);
+  const single = albumComposers.length === 1 ? albumComposers[0] : null;
+  const groups = new Map();
+  for (const t of album.tracks) {
+    const { work, composer } = splitTrackTitle(t.title);
+    if (!work || !/[A-Za-zÀ-ÿ]/.test(work)) continue; // titres sans alphabet latin (rééditions asiatiques)
+    const c = (composer && idx.find(composer)) || single || null;
+    const key = `${c?.id || composer || "?"}|${normTitle(work)}`;
+    if (!groups.has(key)) groups.set(key, { title: work, composer: c, composerName: c?.complete_name || composer || "", tracks: [] });
+    groups.get(key).tracks.push({ id: t.id, title: t.title, duration: t.duration });
+  }
+  const works = [];
+  for (const g of groups.values()) {
+    let oow = null;
+    if (g.composer) {
+      try {
+        const hit = (await worksWithSig(g.composer.id)).find(({ sig }) => matchesWork(sig, g.title));
+        if (hit) oow = hit.w;
+      } catch { /* liste d'œuvres indisponible */ }
+    }
+    works.push({ title: oow?.title || g.title, composer: g.composer, composerName: g.composerName, work: oow, nbTracks: g.tracks.length,
+      duration: g.tracks.reduce((a, t) => a + (t.duration || 0), 0) });
+  }
+  return works;
+}
+
+// Discographie d'un interprète : tous ses albums, analysés au fur et à mesure.
+async function loadArtist(artistId, send, isCancelled) {
+  const key = `art:${artistId}`;
+  const hit = await cacheGet(key, TTL.workSearch);
+  if (hit) {
+    send({ kind: "artist", artist: hit.artist });
+    send({ kind: "albums", albums: hit.albums });
+    send({ kind: "done", cached: true, t: hit.t });
+    return;
+  }
+  const a = await dz(`/artist/${artistId}`, true);
+  const artist = { id: a.id, name: a.name, picture: a.picture_medium || "", nbAlbums: a.nb_album || 0, fans: a.nb_fan || 0 };
+  send({ kind: "artist", artist });
+  const list = [];
+  for (let index = 0; index < 2000; index += 100) {
+    if (isCancelled()) return;
+    const d = await dz(`/artist/${artistId}/albums?limit=100&index=${index}`);
+    list.push(...(d.data || []));
+    send({ kind: "progress", phase: "list", done: list.length, total: d.total || list.length });
+    if (!d.next || !(d.data || []).length) break;
+  }
+  const albums = [];
+  let n = 0;
+  for (const it of list) {
+    if (isCancelled()) return;
+    const full = await dzAlbumFull(it.id);
+    send({ kind: "progress", phase: "albums", done: ++n, total: list.length });
+    if (!full) continue;
+    const { tracks, ...info } = full;
+    const entry = { id: String(it.id), album: { ...info, recordType: it.record_type || info.recordType }, works: await analyseAlbum(full) };
+    albums.push(entry);
+    send({ kind: "albums", albums: [entry] });
+  }
+  await cacheSet(key, { artist, albums, t: Date.now() });
+  send({ kind: "done", cached: false, t: Date.now() });
+}
+
 // --- Messages ------------------------------------------------------------------
 const worksHandlers = {
+  ooOmni: (msg) => ooOmni(msg.q, msg.offset || 0),
+  ooEpoch: (msg) => ooEpoch(msg.epoch),
+  dzArtistSearch: (msg) => dzArtistSearch(msg.q),
   ooComposerSearch: (msg) => ooComposerSearch(msg.q),
   ooPopularComposers: () => ooPopularComposers(),
   ooWorks: (msg) => (String(msg.composerId).startsWith("mb:") ? mbWorks(String(msg.composerId).slice(3)) : ooWorks(msg.composerId)),
   mbComposerSearch: (msg) => mbComposerSearch(msg.q),
 };
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "artist") return;
+  let closed = false;
+  port.onDisconnect.addListener(() => { closed = true; });
+  const send = (m) => { if (!closed) port.postMessage(m); };
+  port.onMessage.addListener(async (m) => {
+    if (m.cmd !== "load") return;
+    try { await loadArtist(m.artistId, send, () => closed); }
+    catch (e) { send({ kind: "error", error: String(e.message || e) }); }
+  });
+});
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "works") return;
@@ -439,4 +687,4 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // Exposé pour les tests.
-self.__testWorks = { workSignature, matchesWork, normTitle, compactRecording, latinName };
+self.__testWorks = { workSignature, matchesWork, normTitle, compactRecording, latinName, splitTrackTitle, analyseAlbum, getComposerIndex };

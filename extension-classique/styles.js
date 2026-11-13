@@ -151,8 +151,27 @@ select option { background: var(--bg); color: var(--fg); }
 .w-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
 .cover { position: relative; }
 .w-badge { position: absolute; left: 6px; top: 6px; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(0,0,0,.65); color: #fff; }
+.w-badge.warn { background: #b4561b; }
+.m.warn { color: #e0894a; }
 .m.rec { color: color-mix(in srgb, var(--acc) 55%, var(--mut)); }
 .w-facets-body { display: flex; flex-direction: column; gap: 18px; }
+/* Accueil : résultats par catégorie */
+.w-sections { display: flex; flex-direction: column; gap: 18px; }
+.w-sections:empty { display: none; }
+.w-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.w-section-head h3 { margin: 0 0 6px; }
+.w-scroll > h3 { margin-top: 14px; }
+/* Interprète : cartes d'album (pochette + œuvres) */
+.w-albums { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 18px 24px; }
+.w-album { display: flex; gap: 14px; min-width: 0; }
+.w-album-cover { flex: none; width: 120px; }
+.w-album-cover .cover { margin: 0; }
+.w-album-body { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.w-album-body > .t { color: var(--fg); text-decoration: none; }
+.w-album-body > .t:hover { text-decoration: underline; }
+.w-album-works { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.w-album-works li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.w-album-works .link { text-align: left; font-size: 13px; }
 .w-facets-head, .w-filter-btn { display: none; }
 /* Écran étroit (téléphone, fenêtre réduite) : filtres dans un panneau glissant */
 @media (max-width: 760px) {
@@ -173,5 +192,8 @@ select option { background: var(--bg); color: var(--fg); }
   .w-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 16px 12px; }
   .w-chiprow .lbl { width: 100%; }
   .w-composer-head img { width: 64px; height: 64px; }
+  .w-albums { grid-template-columns: 1fr; }
+  .w-album-cover { width: 96px; }
+  .w-album-works li { white-space: normal; }
 }
 `;
