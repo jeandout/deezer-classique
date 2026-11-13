@@ -216,6 +216,7 @@ function compactAlbumFull(a) {
     id: a.id, title: a.title, cover: a.cover_medium || "", label: a.label || "", upc: a.upc || "",
     date: a.release_date || "", fans: a.fans || 0, nbTracks: a.nb_tracks || 0, recordType: a.record_type || "",
     contributors: (a.contributors || []).map((c) => c.name),
+    contribs: (a.contributors || []).map((c) => ({ id: c.id, name: c.name })),
     genres: (a.genres?.data || []).map((g) => ({ id: g.id, name: g.name })),
     artistId: a.artist?.id || 0, artistName: a.artist?.name || "",
     tracks: (a.tracks?.data || []).map((t) => ({ id: t.id, title: t.title, duration: t.duration || 0, rank: t.rank || 0 })),
@@ -223,7 +224,7 @@ function compactAlbumFull(a) {
 }
 
 async function dzAlbumFull(id) {
-  return cached(`dzA3:${id}`, TTL.dzAlbumFull, async () => {
+  return cached(`dzA4:${id}`, TTL.dzAlbumFull, async () => {
     const a = await dz(`/album/${id}`);
     if (!a || !a.id) return null;
     const out = compactAlbumFull(a);
@@ -421,11 +422,11 @@ function compactRecording(r) {
   return out;
 }
 
-async function mbByIsrc(isrc) {
+async function mbByIsrc(isrc, urgent = false) {
   const key = `isrc:${isrc}`;
   const o = (await chrome.storage.local.get(key))[key];
   if (o && Date.now() - o.t < (o.v ? TTL.isrcFound : TTL.isrcNone)) return o.v;
-  const d = await mb(`/isrc/${isrc}?inc=artist-rels+place-rels+work-rels`);
+  const d = await mb(`/isrc/${isrc}?inc=artist-rels+place-rels+work-rels`, urgent);
   const recs = (d.recordings || []).map(compactRecording).filter((r) => r.hasData);
   const v = recs[0] || null;
   await cacheSet(key, v);
@@ -562,7 +563,7 @@ async function worksWithSig(composerId) {
 
 // Analyse d'un album d'un interprète : œuvres contenues, compositeur et œuvre
 // Open Opus correspondante quand on la reconnaît.
-async function analyseAlbum(album) {
+async function analyseAlbum(album, withTracks = false) {
   const idx = await getComposerIndex();
   const albumComposers = album.contributors.map((n) => idx.find(n)).filter(Boolean);
   const single = albumComposers.length === 1 ? albumComposers[0] : null;
@@ -585,6 +586,7 @@ async function analyseAlbum(album) {
       } catch { /* liste d'œuvres indisponible */ }
     }
     works.push({ title: oow?.title || g.title, composer: g.composer, composerName: g.composerName, work: oow, nbTracks: g.tracks.length,
+      ...(withTracks ? { tracks: g.tracks } : {}),
       duration: g.tracks.reduce((a, t) => a + (t.duration || 0), 0) });
   }
   return works;
@@ -627,6 +629,33 @@ async function loadArtist(artistId, send, isCancelled) {
   send({ kind: "done", cached: false, t: Date.now() });
 }
 
+// --- Fiche d'un album ------------------------------------------------------------
+// Contenu (œuvres et pistes), interprètes avec leur identifiant Deezer, puis, œuvre
+// par œuvre, les détails d'enregistrement MusicBrainz (via l'ISRC d'une piste).
+async function trackIsrc(trackId) {
+  return cached(`isrcOf:${trackId}`, TTL.dzAlbumFull, async () => (await dz(`/track/${trackId}`, true))?.isrc || "");
+}
+
+async function loadAlbumDetail(albumId, send, isCancelled) {
+  const full = await dzAlbumFull(albumId);
+  if (!full) throw new Error("Album introuvable sur Deezer.");
+  const works = await analyseAlbum(full, true);
+  const { tracks, ...album } = full;
+  send({ kind: "album", album, works, totalDuration: tracks.reduce((a, t) => a + (t.duration || 0), 0), nbTracks: tracks.length });
+  for (let i = 0; i < works.length; i++) {
+    if (isCancelled()) return;
+    let rec = null;
+    for (const t of works[i].tracks.slice(0, 2)) {
+      const isrc = await trackIsrc(t.id).catch(() => "");
+      // Prioritaire : passe devant l'enrichissement en masse de la liste d'origine.
+      if (isrc) rec = await mbByIsrc(isrc, true).catch(() => null);
+      if (rec) break;
+    }
+    send({ kind: "rec", index: i, data: rec });
+  }
+  send({ kind: "done" });
+}
+
 // --- Messages ------------------------------------------------------------------
 const worksHandlers = {
   ooOmni: (msg) => ooOmni(msg.q, msg.offset || 0),
@@ -637,6 +666,18 @@ const worksHandlers = {
   ooWorks: (msg) => (String(msg.composerId).startsWith("mb:") ? mbWorks(String(msg.composerId).slice(3)) : ooWorks(msg.composerId)),
   mbComposerSearch: (msg) => mbComposerSearch(msg.q),
 };
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "album") return;
+  let closed = false;
+  port.onDisconnect.addListener(() => { closed = true; });
+  const send = (m) => { if (!closed) port.postMessage(m); };
+  port.onMessage.addListener(async (m) => {
+    if (m.cmd !== "load") return;
+    try { await loadAlbumDetail(m.albumId, send, () => closed); }
+    catch (e) { send({ kind: "error", error: String(e.message || e) }); }
+  });
+});
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "artist") return;

@@ -152,6 +152,31 @@ select option { background: var(--bg); color: var(--fg); }
 .cover { position: relative; }
 .w-badge { position: absolute; left: 6px; top: 6px; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(0,0,0,.65); color: #fff; }
 .w-badge.warn { background: #b4561b; }
+/* Cartes : clic = fiche de l'album, ▶ = écouter sur Deezer */
+.item[role=button] { cursor: pointer; border-radius: 8px; }
+.item[role=button]:hover .t { text-decoration: underline; }
+.w-plain { background: none; border: 0; padding: 0; margin: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; display: block; width: 100%; }
+.w-album-cover { position: relative; }
+.w-play { position: absolute; right: 8px; bottom: 8px; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--acc); color: #fff !important; text-decoration: none !important; font-size: 15px; box-shadow: 0 4px 14px rgba(0,0,0,.35);
+  opacity: .92; transition: transform .12s, opacity .12s; z-index: 1; padding-left: 2px; }
+.w-play:hover { opacity: 1; transform: scale(1.08); }
+.w-play.big { position: static; width: auto; height: 44px; border-radius: 999px; padding: 0 22px; font-size: 15px; font-weight: 700; align-self: flex-start; display: inline-flex; align-items: center; }
+/* Fiche d'album */
+.w-albumview { gap: 16px; }
+.w-album-head { display: grid; grid-template-columns: 240px 1fr; gap: 24px; align-items: start; }
+.cover.big { width: 240px; aspect-ratio: 1; }
+.w-album-info { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.w-album-info h2 { margin: 0; }
+.w-people { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.w-people .lbl { width: 140px; flex: none; }
+.w-work-block { border-top: 1px solid var(--line); padding: 14px 0 4px; display: flex; flex-direction: column; gap: 8px; }
+.w-work-title { font-size: 16px; }
+.w-wtitle { font-size: 16px; font-weight: 600; text-align: left; }
+.w-tracks { margin: 4px 0 0; padding-left: 22px; display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--mut); }
+.w-tracks li { display: list-item; }
+.w-tracks .tt { color: var(--fg); }
+.w-tracks .td { margin-left: 10px; font-variant-numeric: tabular-nums; }
 .m.warn { color: #e0894a; }
 .m.rec { color: color-mix(in srgb, var(--acc) 55%, var(--mut)); }
 .w-facets-body { display: flex; flex-direction: column; gap: 18px; }
@@ -193,6 +218,9 @@ select option { background: var(--bg); color: var(--fg); }
   .w-chiprow .lbl { width: 100%; }
   .w-composer-head img { width: 64px; height: 64px; }
   .w-albums { grid-template-columns: 1fr; }
+  .w-album-head { grid-template-columns: 1fr; }
+  .cover.big { width: min(260px, 70vw); }
+  .w-people .lbl { width: 100%; }
   .w-album-cover { width: 96px; }
   .w-album-works li { white-space: normal; }
 }
