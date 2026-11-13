@@ -186,6 +186,7 @@ select option { background: var(--bg); color: var(--fg); }
 .w-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .w-section-head h3 { margin: 0 0 6px; }
 .w-scroll > h3 { margin-top: 14px; }
+.w-scroll > .btn, .w-workhead > .btn { align-self: flex-start; }
 /* Interprète : cartes d'album (pochette + œuvres) */
 .w-albums { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 18px 24px; }
 .w-album { display: flex; gap: 14px; min-width: 0; }

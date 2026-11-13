@@ -123,8 +123,15 @@ window.__dzWorks = function createWorks(ctx) {
       const pick = byBarcode.find((l) => sameLabel(l.name, album.label)) || (byBarcode.length === 1 ? byBarcode[0] : null);
       if (pick) return openLabels([pick.id], { prev });
       const byName = await call("searchLabels", { q: album.label });
-      const exact = byName.filter((l) => labelKeyOf(l.name) === labelKeyOf(album.label) && !NOT_RECORD_LABEL.test(l.type || ""));
-      if (exact.length === 1) return openLabels([exact[0].id], { prev });
+      const exact = byName.filter((l) => labelKeyOf(l.name) === labelKeyOf(album.label) && !NOT_RECORD_LABEL.test(l.type || ""))
+        .sort((x, y) => (y.score || 0) - (x.score || 0));
+      // Plusieurs labels du même nom (Hyperion GB / Hyperion Records DE) : on prend celui
+      // décrit comme classique, ou celui qui est nettement en tête de la recherche.
+      const classical = exact.filter((l) => /classi/i.test(l.disambiguation || ""));
+      const best = exact.length === 1 ? exact[0]
+        : classical.length === 1 ? classical[0]
+        : exact.length && (exact[0].score || 0) >= 95 && (exact[0].score || 0) - (exact[1].score || 0) >= 20 ? exact[0] : null;
+      if (best) return openLabels([best.id], { prev });
       if (S.labelView !== V) return;
       V.resolving = false;
       V.candidates = [...byBarcode, ...byName.filter((l) => !byBarcode.some((b) => b.id === l.id))];
@@ -1200,12 +1207,12 @@ window.__dzWorks = function createWorks(ctx) {
     if (V.resolving || V.candidates || V.error && !V.infosLoaded) {
       r.body = h("div", { class: "w-scroll" });
       r.root.append(r.body);
-      r.body.append(back, h("h2", {}, V.title || "Label"),
+      r.body.append(...[back, h("h2", {}, V.title || "Label"),
         V.resolving ? h("div", { class: "muted" }, "Recherche du label dans MusicBrainz…") : "",
         V.error ? h("div", { class: "error" }, V.error) : "",
         V.candidates ? [h("div", { class: "muted" }, V.candidates.length ? "Plusieurs labels possibles : choisissez." : "Label introuvable dans MusicBrainz."),
           h("div", { class: "w-works" }, V.candidates.map((l) => h("button", { class: "w-work", onclick: () => openLabels([l.id], { prev: V.prev }) },
-            h("div", {}, h("div", { class: "strong" }, l.name), h("div", { class: "muted small" }, [l.disambiguation, l.type, l.country, l.catno].filter(Boolean).join(" · "))))))] : "");
+            h("div", {}, h("div", { class: "strong" }, l.name), h("div", { class: "muted small" }, [l.disambiguation, l.type, l.country, l.catno].filter(Boolean).join(" · "))))))] : ""].flat());
       r.resolveOnly = true;
       return;
     }
