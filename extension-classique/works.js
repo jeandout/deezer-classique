@@ -13,7 +13,7 @@ window.__dzWorks = function createWorks(ctx) {
     ["prelude", "Prélude"], ["fugue", "Fugue"], ["etude", "Étude"], ["nocturne", "Nocturne"], ["waltz", "Valse"],
     ["mazurka", "Mazurka"], ["polonaise", "Polonaise"], ["ballade", "Ballade"], ["scherzo", "Scherzo"],
     ["impromptu", "Impromptu"], ["variation", "Variations"], ["suite", "Suite"], ["rhapsod", "Rhapsodie"],
-    ["overture", "Ouverture"], ["mass", "Messe"], ["requiem", "Requiem"], ["cantata", "Cantate"], ["oratorio", "Oratorio"],
+    ["overture", "Ouverture"], ["mass\\b", "Messe"], ["missa", "Messe"], ["requiem", "Requiem"], ["cantata", "Cantate"], ["oratorio", "Oratorio"],
     ["opera", "Opéra"], ["song", "Mélodie / lied"], ["lied", "Mélodie / lied"], ["partita", "Partita"],
     ["fantasi", "Fantaisie"], ["fantasy", "Fantaisie"], ["serenade", "Sérénade"], ["divertimento", "Divertimento"],
     ["toccata", "Toccata"], ["bagatelle", "Bagatelle"], ["intermezzo", "Intermezzo"], ["romance", "Romance"],
@@ -22,8 +22,8 @@ window.__dzWorks = function createWorks(ctx) {
   ];
   const INSTRUMENTS = [
     ["piano", "Piano"], ["violin", "Violon"], ["cello", "Violoncelle"], ["viola", "Alto"], ["flute", "Flûte"],
-    ["oboe", "Hautbois"], ["clarinet", "Clarinette"], ["bassoon", "Basson"], ["horn", "Cor"], ["trumpet", "Trompette"],
-    ["trombone", "Trombone"], ["organ", "Orgue"], ["harpsichord", "Clavecin"], ["guitar", "Guitare"], ["harp", "Harpe"],
+    ["oboe", "Hautbois"], ["clarinet", "Clarinette"], ["bassoon", "Basson"], ["horns?\\b", "Cor"], ["trumpet", "Trompette"],
+    ["trombone", "Trombone"], ["organs?\\b", "Orgue"], ["harpsichord", "Clavecin"], ["guitar", "Guitare"], ["harps?\\b", "Harpe"],
     ["string", "Cordes"], ["orchestra", "Orchestre"], ["choir", "Chœur"], ["chorus", "Chœur"], ["soprano", "Voix"],
     ["voice", "Voix"], ["keyboard", "Clavier"],
   ];
@@ -50,6 +50,8 @@ window.__dzWorks = function createWorks(ctx) {
     albumView: null,                            // fiche d'un album { id, preview, album, works, recs, prev }
     labelHits: null,                            // recherche unique : labels
     labelView: null,                            // catalogue d'un ou plusieurs labels
+    browse: null,                               // catalogue des œuvres (index local) { id, label, sel, open, text, essential, sort, shown }
+    chart: null,                                // albums classiques du moment sur Deezer
     composer: null, works: null, wf: { text: "", genre: "all", form: null, instrument: null, popularOnly: false },
     work: null, entries: new Map(), enrich: new Map(), progress: null, done: false, error: null, cachedAt: null,
     sel: {}, open: {}, sort: "popular", text: "", shown: PAGE,
@@ -57,31 +59,67 @@ window.__dzWorks = function createWorks(ctx) {
   };
   let port = null, requested = new Set(), lastPrio = "", cards = new Map();
   let artistPort = null, artistCards = new Map(), albumPort = null, labelPort = null, labelCards = new Map();
-  const scrollMemo = new Map(); // positions de défilement à retrouver au retour d'une fiche d'album
+  const scrollMemo = new Map(); // positions de défilement à retrouver au retour
   let container = null, refs = null, builtKey = "";
 
-  // --- Navigation -------------------------------------------------------------
-  function go(view, patch = {}) {
-    Object.assign(S, patch, { view });
-    // La liste d'origine reste active pendant qu'on consulte une fiche d'album.
+  // --- Navigation et historique -------------------------------------------------
+  // Chaque changement de page empile l'état de la page quittée (filtres, données
+  // déjà chargées, position de défilement). « ← » revient exactement à la page
+  // précédente, quel que soit le chemin suivi.
+  const backStack = [];
+  let restoreKey = null;
+
+  function captureScroll() {
+    if (!refs?.root) return [];
+    return [...refs.root.querySelectorAll(".w-root, .w-scroll, .w-results, .w-facets")].concat(refs.root).map((el) => [el.className, el.scrollTop]);
+  }
+
+  // Connexions aux données : une seule page active à la fois (les autres sont
+  // fermées), sauf la liste d'origine qu'on garde pendant la fiche d'un album.
+  function closePorts(view) {
     if (view !== "work" && view !== "album" && port) { port.disconnect(); port = null; }
     if (view !== "artist" && view !== "album" && artistPort) { artistPort.disconnect(); artistPort = null; }
     if (view !== "album" && albumPort) { albumPort.disconnect(); albumPort = null; }
     if (view !== "label" && view !== "album" && labelPort) { labelPort.disconnect(); labelPort = null; }
+  }
+
+  function go(view, patch = {}, { push = true } = {}) {
+    if (push && refs) {
+      backStack.push({ S: { ...S }, key: builtKey, scroll: captureScroll() });
+      if (backStack.length > 50) backStack.shift();
+    }
+    Object.assign(S, patch, { view });
+    closePorts(view);
     schedule(true);
   }
 
-  // --- Fiche d'album -----------------------------------------------------------
-  function rememberScroll() {
-    if (!refs?.root) return;
-    scrollMemo.set(builtKey, [...refs.root.querySelectorAll(".w-root, .w-scroll, .w-results, .w-facets")].concat(refs.root)
-      .map((el) => [el.className, el.scrollTop]));
+  function goHome() { go("home"); }
+
+  function goBack() {
+    const snap = backStack.pop();
+    if (!snap) return go("home", {}, { push: false });
+    Object.assign(S, snap.S);
+    restoreKey = snap.key;
+    scrollMemo.set(snap.key, snap.scroll);
+    closePorts(S.view);
+    // Données interrompues en quittant la page : on les relance (le cache rend
+    // la reprise immédiate) sans toucher aux filtres.
+    if (S.view === "work" && !port) connectWork();
+    if (S.view === "artist" && !artistPort && !S.artist.done) connectArtist();
+    if (S.view === "album" && !albumPort && !S.albumView.done) connectAlbum();
+    if (S.view === "label" && !labelPort && S.labelView.infosLoaded && S.labelView.ids.length) connectLabel();
+    schedule(true);
   }
+  const canGoBack = () => backStack.length > 0;
+  const backTarget = () => backStack[backStack.length - 1]?.S.view;
+
+  // --- Fiche d'album -----------------------------------------------------------
   function openAlbumDetail(id, preview) {
-    rememberScroll();
-    const prev = S.view === "album" ? S.albumView.prev : { view: S.view, key: builtKey };
+    go("album", { albumView: { id: String(id), preview, album: null, works: [], recs: [], done: false, error: null } });
+    connectAlbum();
+  }
+  function connectAlbum() {
     if (albumPort) albumPort.disconnect();
-    go("album", { albumView: { id: String(id), preview, album: null, works: [], recs: [], done: false, error: null, prev } });
     albumPort = chrome.runtime.connect({ name: "album" });
     const my = albumPort, V = S.albumView;
     my.onMessage.addListener((m) => {
@@ -92,15 +130,8 @@ window.__dzWorks = function createWorks(ctx) {
       else if (m.kind === "error") V.error = m.error;
       schedule();
     });
-    my.postMessage({ cmd: "load", albumId: id });
+    my.postMessage({ cmd: "load", albumId: V.id });
   }
-  function backFromAlbum() {
-    const prev = S.albumView?.prev;
-    if (!prev || prev.view === "album") return go("home");
-    restoreKey = prev.key;
-    go(prev.view);
-  }
-  let restoreKey = null;
 
   // --- Labels ------------------------------------------------------------------
   const LABEL_NOISE_RE = /\b(records?|recordings?|music|musique|musik|label|ltd|limited|inc|gmbh|sa|sarl|llc|co|company|classics?|entertainment|productions?|editions?)\b/g;
@@ -109,20 +140,20 @@ window.__dzWorks = function createWorks(ctx) {
   const NOT_RECORD_LABEL = /publisher|distributor|holding|rights society|manufacturer|bootleg/i;
   // Sous-labels : filiales, marques (imprint), autres noms du même label.
   const isSubLabel = (r) => ((r.type === "label ownership" || r.type === "imprint") && r.direction === "forward") || r.type === "label rename";
+  const emptyLabelView = (extra) => ({ ids: [], labels: [], off: [], groups: new Map(), matches: new Map(), progress: {}, doneIds: new Set(),
+    sel: {}, open: {}, sort: "date-desc", text: "", shown: PAGE, requested: new Set(), lastPrio: "", ...extra });
 
-  // Label cliqué dans une fiche d'album : identifié par le code-barres de l'album
-  // (exact), sinon par son nom.
+  // Label désigné par son nom (fiche d'album, raccourci de l'accueil) : identifié
+  // par le code-barres de l'album s'il est connu (exact), sinon par son nom.
   async function openLabelFromAlbum(album) {
-    const prev = { view: S.view, key: builtKey };
-    rememberScroll();
-    go("label", { labelView: { ids: [], labels: [], off: [], title: album.label, resolving: true, candidates: null, prev, groups: new Map(),
-      matches: new Map(), progress: {}, doneIds: new Set(), sel: {}, open: {}, sort: "date-desc", text: "", shown: PAGE } });
+    go("label", { labelView: emptyLabelView({ title: album.label, resolving: true, candidates: null }) });
     const V = S.labelView;
     try {
       const byBarcode = album.upc ? await call("labelsByBarcode", { upc: album.upc }) : [];
       const pick = byBarcode.find((l) => sameLabel(l.name, album.label)) || (byBarcode.length === 1 ? byBarcode[0] : null);
-      if (pick) return openLabels([pick.id], { prev });
+      if (pick && S.labelView === V) return openLabels([pick.id], { push: false });
       const byName = await call("searchLabels", { q: album.label });
+      if (S.labelView !== V) return;
       const exact = byName.filter((l) => labelKeyOf(l.name) === labelKeyOf(album.label) && !NOT_RECORD_LABEL.test(l.type || ""))
         .sort((x, y) => (y.score || 0) - (x.score || 0));
       // Plusieurs labels du même nom (Hyperion GB / Hyperion Records DE) : on prend celui
@@ -131,24 +162,21 @@ window.__dzWorks = function createWorks(ctx) {
       const best = exact.length === 1 ? exact[0]
         : classical.length === 1 ? classical[0]
         : exact.length && (exact[0].score || 0) >= 95 && (exact[0].score || 0) - (exact[1].score || 0) >= 20 ? exact[0] : null;
-      if (best) return openLabels([best.id], { prev });
-      if (S.labelView !== V) return;
+      if (best) return openLabels([best.id], { push: false });
       V.resolving = false;
       V.candidates = [...byBarcode, ...byName.filter((l) => !byBarcode.some((b) => b.id === l.id))];
     } catch (e) { V.resolving = false; V.error = e.message; }
     schedule(true);
   }
+  const openLabelByName = (name) => openLabelFromAlbum({ label: name, upc: "" });
 
   // Catalogue d'un ou plusieurs labels. Les sous-labels sont ajoutés (et cochés)
   // automatiquement ; off = labels décochés, affichés pour pouvoir les recocher.
-  async function openLabels(ids, { expand = true, off = [], prev } = {}) {
+  async function openLabels(ids, { expand = true, off = [], push = true } = {}) {
     ids = [...new Set(ids)];
     if (labelPort) { labelPort.disconnect(); labelPort = null; }
-    prev = prev || S.labelView?.prev || { view: S.view === "label" ? "home" : S.view, key: builtKey };
-    const token = {};
-    go("label", { labelView: { ids, labels: ids.map((id) => ({ id, name: "…", relations: [] })), off, infosLoaded: false, expanding: expand,
-      prev, token, groups: new Map(), matches: new Map(), progress: {}, doneIds: new Set(), loadDone: !ids.length, error: null,
-      sel: {}, open: {}, sort: "date-desc", text: "", shown: PAGE } });
+    go("label", { labelView: emptyLabelView({ ids, labels: ids.map((id) => ({ id, name: "…", relations: [] })), off, infosLoaded: false,
+      expanding: expand, loadDone: !ids.length, error: null }) }, { push });
     labelCards = new Map();
     const V = S.labelView;
     const infos = new Map();
@@ -168,9 +196,14 @@ window.__dzWorks = function createWorks(ctx) {
     V.labels = ids.map((id) => infos.get(id) || { id, name: id, relations: [] });
     V.infosLoaded = true; V.expanding = false;
     schedule(true);
-    if (!ids.length) return;
+    if (ids.length) connectLabel();
+  }
+  function connectLabel() {
+    const V = S.labelView;
+    if (labelPort) labelPort.disconnect();
     labelPort = chrome.runtime.connect({ name: "catalog" });
     const my = labelPort;
+    V.requested = new Set(); V.lastPrio = ""; V.doneIds = new Set();
     my.onMessage.addListener((m) => {
       if (my !== labelPort) return;
       if (m.kind === "groups") {
@@ -181,19 +214,19 @@ window.__dzWorks = function createWorks(ctx) {
           for (const r of g.releases) if (!seen.has(r.id)) ex.releases.push(r);
         }
       } else if (m.kind === "progress") V.progress[m.mbid] = m;
-      else if (m.kind === "done") { V.doneIds.add(m.mbid); if (m.cached) V.cachedAt = Math.min(V.cachedAt || Infinity, m.t); V.loadDone = V.doneIds.size === ids.length; }
+      else if (m.kind === "done") { V.doneIds.add(m.mbid); if (m.cached) V.cachedAt = Math.min(V.cachedAt || Infinity, m.t); V.loadDone = V.doneIds.size === V.ids.length; }
       else if (m.kind === "match") V.matches.set(m.id, m.result);
       else if (m.kind === "error") V.error = m.error;
       schedule();
     });
-    my.postMessage({ cmd: "load", mbids: ids });
-    V.requested = new Set(); V.lastPrio = "";
+    my.postMessage({ cmd: "load", mbids: V.ids });
   }
 
+  // Cocher / décocher un label remplace la page courante (pas d'entrée d'historique).
   function toggleLabel(id, name) {
     const V = S.labelView;
-    if (V.ids.includes(id)) openLabels(V.ids.filter((x) => x !== id), { expand: false, off: [...V.off, { id, name }], prev: V.prev });
-    else openLabels([...V.ids, id], { expand: false, off: V.off.filter((o) => o.id !== id), prev: V.prev });
+    if (V.ids.includes(id)) openLabels(V.ids.filter((x) => x !== id), { expand: false, off: [...V.off, { id, name }], push: false });
+    else openLabels([...V.ids, id], { expand: false, off: V.off.filter((o) => o.id !== id), push: false });
   }
 
   // Interprète cliqué : sa page Deezer (par identifiant, sinon par recherche du nom).
@@ -206,16 +239,13 @@ window.__dzWorks = function createWorks(ctx) {
     } catch { /* recherche indisponible */ }
   }
 
-  // Œuvre choisie depuis une autre page (recherche, type d'œuvre, interprète).
+  // Œuvre choisie depuis une autre page (recherche, catalogue, interprète, album).
   function openWorkOf(composer, work) {
-    S.composer = composer;
-    S.works = null;
-    openWork(work);
+    openWork(work, composer);
   }
 
-  // Œuvres d'un type, tous compositeurs (« concerto pour violon »…). Toutes les
-  // pages sont chargées pour que les filtres (époque, compositeur…) portent sur
-  // la liste entière.
+  // Œuvres d'une recherche, tous compositeurs (« toutes les œuvres » de l'accueil).
+  // Toutes les pages sont chargées pour que les filtres portent sur la liste entière.
   async function openOmni(q, label) {
     go("omni", { omni: { q, label: label || `« ${q} »`, results: [], next: 0, loading: true, sel: {}, open: {}, text: "", popularOnly: false } });
     const o = S.omni;
@@ -233,16 +263,20 @@ window.__dzWorks = function createWorks(ctx) {
 
   async function openEpoch(id, label) {
     go("epoch", { epoch: { id, label, composers: null } });
-    try { S.epoch.composers = await call("ooEpoch", { epoch: id }); } catch (e) { S.epoch.error = e.message; }
+    const e = S.epoch;
+    try { e.composers = await call("ooEpoch", { epoch: id }); } catch (err) { e.error = err.message; }
     schedule();
   }
 
   // Discographie d'un interprète, analysée album par album.
   function openArtist(a) {
-    if (artistPort) artistPort.disconnect();
     go("artist", { artist: { info: a, albums: new Map(), progress: null, done: false, error: null, cachedAt: null,
       sel: {}, open: {}, sort: "recent", text: "", shown: PAGE } });
     artistCards = new Map();
+    connectArtist();
+  }
+  function connectArtist() {
+    if (artistPort) artistPort.disconnect();
     artistPort = chrome.runtime.connect({ name: "artist" });
     const my = artistPort, A = S.artist;
     my.onMessage.addListener((m) => {
@@ -254,10 +288,11 @@ window.__dzWorks = function createWorks(ctx) {
       else if (m.kind === "error") A.error = m.error;
       schedule();
     });
-    my.postMessage({ cmd: "load", artistId: a.id });
+    my.postMessage({ cmd: "load", artistId: A.info.id });
   }
 
   async function openComposer(c) {
+    if (S.view === "composer" && S.composer?.id === c.id) return;
     go("composer", { composer: c, works: null, wf: { text: "", genre: "all", form: null, instrument: null, popularOnly: false } });
     try {
       const d = await call("ooWorks", { composerId: c.id });
@@ -268,27 +303,30 @@ window.__dzWorks = function createWorks(ctx) {
     schedule();
   }
 
-  function openWork(w) {
-    if (port) port.disconnect();
+  function openWork(w, composer = S.composer) {
     go("work", {
-      work: w, entries: new Map(), enrich: new Map(), progress: null, done: false, error: null, cachedAt: null,
+      composer, work: w, entries: new Map(), enrich: new Map(), progress: null, done: false, error: null, cachedAt: null,
       // Par défaut, seules les versions complètes (les compilations d'extraits sont nombreuses).
       // Les albums douteux (IA, hors classique) sont masqués par défaut, mais comptés dans « Fiabilité ».
       sel: { version: new Set(["Œuvre complète"]), trust: new Set(["Classique"]) }, open: {}, text: "", shown: PAGE, mov: "all",
     });
+    connectWork();
+  }
+  function connectWork() {
+    if (port) port.disconnect();
     requested = new Set(); lastPrio = ""; cards = new Map();
     port = chrome.runtime.connect({ name: "works" });
-    const my = port;
+    const my = port, entries = S.entries, enrich = S.enrich;
     my.onMessage.addListener((m) => {
       if (my !== port) return;
-      if (m.kind === "entries") for (const e of m.entries) S.entries.set(e.id, e);
+      if (m.kind === "entries") for (const e of m.entries) entries.set(e.id, e);
       else if (m.kind === "progress") S.progress = m;
       else if (m.kind === "done") { S.done = true; S.cachedAt = m.cached ? m.t : null; }
-      else if (m.kind === "enrich") { S.enrich.set(m.id, m.data); cards.delete(m.id); }
+      else if (m.kind === "enrich") { enrich.set(m.id, m.data); cards.delete(m.id); }
       else if (m.kind === "error") S.error = m.error;
       schedule();
     });
-    my.postMessage({ cmd: "search", composer: S.composer, work: w });
+    my.postMessage({ cmd: "search", composer: S.composer, work: S.work });
   }
 
   let searchTimer = null;
@@ -518,13 +556,13 @@ window.__dzWorks = function createWorks(ctx) {
     const key = {
       work: () => `work:${S.work?.id}`, composer: () => `composer:${S.composer?.id}`, omni: () => `omni:${S.omni?.q}`,
       epoch: () => `epoch:${S.epoch?.id}`, artist: () => `artist:${S.artist?.info?.id}`, home: () => "home",
-      album: () => `album:${S.albumView?.id}`,
+      album: () => `album:${S.albumView?.id}`, browse: () => `browse:${S.browse?.id}`,
       label: () => `label:${(S.labelView?.ids || []).join(",")}|${(S.labelView?.off || []).map((o) => o.id).join(",")}|${S.labelView?.infosLoaded}|${!!S.labelView?.candidates}`,
     }[S.view]();
     const views = {
       home: [buildHome, patchHome], composer: [buildComposer, patchComposer], work: [buildWork, patchWork],
       omni: [buildOmni, patchOmni], epoch: [buildEpoch, patchEpoch], artist: [buildArtist, patchArtist],
-      album: [buildAlbum, patchAlbum], label: [buildLabel, patchLabel],
+      album: [buildAlbum, patchAlbum], label: [buildLabel, patchLabel], browse: [buildBrowse, patchBrowse],
     };
     if (key !== builtKey || !refs || !container.contains(refs.root)) {
       builtKey = key;
@@ -544,21 +582,40 @@ window.__dzWorks = function createWorks(ctx) {
     views[S.view][1](refs);
   }
 
+  // Fil d'Ariane, précédé d'un bouton « ← » dès qu'il existe une page précédente.
+  const BACK_LABELS = { home: "Accueil", composer: "Compositeur", work: "Enregistrements", omni: "Liste d'œuvres", browse: "Catalogue",
+    epoch: "Époque", artist: "Interprète", album: "Album", label: "Label" };
   function crumbs(...items) {
-    return h("nav", { class: "w-crumbs" }, items.map((it, i) => [
-      i ? h("span", { class: "sep" }, "›") : null,
-      it.onclick ? h("button", { class: "link", onclick: it.onclick }, it.label) : h("span", { class: "cur" }, it.label),
-    ]));
+    return h("nav", { class: "w-crumbs" },
+      canGoBack() ? h("button", { class: "w-back", title: `Revenir à : ${BACK_LABELS[backTarget()] || "page précédente"}`, onclick: goBack }, "←") : null,
+      items.map((it, i) => [
+        i ? h("span", { class: "sep" }, "›") : null,
+        it.onclick ? h("button", { class: "link", onclick: it.onclick }, it.label) : h("span", { class: "cur" }, it.label),
+      ]));
   }
 
+
   // --- Accueil : recherche unique (compositeurs, œuvres, interprètes) + raccourcis ---
+  // Raccourcis de l'accueil : chacun ouvre le catalogue des œuvres avec des filtres
+  // déjà choisis (qu'on peut ensuite combiner librement).
   const TYPE_SHORTCUTS = [
-    ["Concertos pour piano", "piano concerto"], ["Concertos pour violon", "violin concerto"],
-    ["Concertos pour violoncelle", "cello concerto"], ["Symphonies", "symphony"], ["Quatuors à cordes", "string quartet"],
-    ["Sonates pour piano", "piano sonata"], ["Sonates pour violon", "violin sonata"], ["Trios avec piano", "piano trio"],
-    ["Quintettes", "quintet"], ["Requiem", "requiem"], ["Messes", "missa"], ["Opéras", "opera"], ["Ballets", "ballet"],
-    ["Préludes", "prelude"], ["Nocturnes", "nocturne"], ["Variations", "variations"], ["Cantates", "cantata"],
+    ["Concertos pour piano", { form: ["Concerto"], instrument: ["Piano"] }], ["Concertos pour violon", { form: ["Concerto"], instrument: ["Violon"] }],
+    ["Concertos pour violoncelle", { form: ["Concerto"], instrument: ["Violoncelle"] }], ["Symphonies", { form: ["Symphonie"] }],
+    ["Quatuors à cordes", { formation: ["Quatuor"], instrument: ["Cordes"] }], ["Sonates pour piano", { form: ["Sonate"], formation: ["Clavier seul"] }],
+    ["Sonates pour violon", { form: ["Sonate"], instrument: ["Violon"] }], ["Trios avec piano", { formation: ["Trio"], instrument: ["Piano"] }],
+    ["Quintettes", { formation: ["Quintette"] }], ["Requiem", { form: ["Requiem"] }], ["Messes", { form: ["Messe"] }],
+    ["Opéras", { form: ["Opéra"] }], ["Ballets", { form: ["Ballet"] }], ["Préludes", { form: ["Prélude"] }],
+    ["Nocturnes", { form: ["Nocturne"] }], ["Variations", { form: ["Variations"] }], ["Cantates", { form: ["Cantate"] }],
+    ["Poèmes symphoniques", { form: ["Poème symphonique"] }], ["Lieder et mélodies", { form: ["Mélodie / lied"] }],
   ];
+  const INSTRUMENT_SHORTCUTS = ["Piano", "Violon", "Violoncelle", "Alto", "Orgue", "Clavecin", "Guitare", "Harpe", "Flûte", "Hautbois",
+    "Clarinette", "Basson", "Cor", "Trompette", "Voix", "Chœur"];
+  const FORMATIONS = ["Instrument seul", "Clavier seul", "Duo", "Trio", "Quatuor", "Quintette", "Sextuor et plus", "Musique de chambre (autre)",
+    "Soliste et orchestre", "Orchestre", "Chœur", "Voix (mélodies, lieder, airs)", "Scène (opéra, ballet)"];
+  const CLASSICAL_LABELS = ["Deutsche Grammophon", "Decca", "Harmonia Mundi", "Hyperion", "Chandos", "BIS", "Alpha Classics", "Naxos", "Erato",
+    "Sony Classical", "Warner Classics", "ECM New Series", "Archiv Produktion", "Channel Classics", "Pentatone", "Linn Records", "Ondine",
+    "Glossa", "Ricercar", "Mirare", "Aparté", "cpo"];
+
   const EPOCHS = [
     ["Medieval", "Médiéval"], ["Renaissance", "Renaissance"], ["Baroque", "Baroque"], ["Classical", "Classique"],
     ["Early Romantic", "Premier romantisme"], ["Romantic", "Romantique"], ["Late Romantic", "Romantisme tardif"],
@@ -571,15 +628,28 @@ window.__dzWorks = function createWorks(ctx) {
   function buildHome(r) {
     r.results = h("div", { class: "w-sections" });
     r.popular = h("div", { class: "w-composers" });
+    r.chart = h("div", { class: "grid w-grid" });
+    const row = (label, chips) => h("div", { class: "w-chiprow" }, h("span", { class: "muted small lbl" }, label), chips);
     r.root.append(h("div", { class: "w-scroll" },
       h("h2", {}, "Rechercher"),
       h("input", { type: "search", class: "w-big", placeholder: "Compositeur, œuvre, interprète ou label : Rachmaninov, concerto pour violon, Trifonov, Chandos…",
         value: S.q, oninput: (e) => onSearchInput(e.target.value) }),
       r.results,
-      h("h3", {}, "Par type d'œuvre"),
-      h("div", { class: "chips" }, TYPE_SHORTCUTS.map(([label, q]) => h("button", { class: "chip", onclick: () => openOmni(q, label) }, label))),
-      h("h3", {}, "Par époque"),
+      h("div", { class: "w-section-head" }, h("h3", {}, "Parcourir les œuvres"),
+        h("button", { class: "link small", onclick: () => openBrowse("Toutes les œuvres", {}) }, "tout le catalogue →")),
+      h("div", { class: "w-chiprows" },
+        row("Type d'œuvre", TYPE_SHORTCUTS.map(([label, preset]) => h("button", { class: "chip", onclick: () => openBrowse(label, preset) }, label))),
+        row("Instrument", INSTRUMENT_SHORTCUTS.map((i) => h("button", { class: "chip", onclick: () => openBrowse(`Œuvres : ${i.toLowerCase()}`, { instrument: [i] }) }, i))),
+        row("Formation", FORMATIONS.map((f) => h("button", { class: "chip", onclick: () => openBrowse(f, { formation: [f] }) }, f))),
+        row("Genre", Object.values(GENRES).map((g) => h("button", { class: "chip", onclick: () => openBrowse(g, { genre: [g] }) }, g))),
+        row("Sélection", [h("button", { class: "chip sel", onclick: () => openBrowse("Les incontournables", {}, { essential: true }) }, "★ Les incontournables")])),
+      h("h3", {}, "Compositeurs par époque"),
       h("div", { class: "chips" }, EPOCHS.map(([id, label]) => h("button", { class: "chip", onclick: () => openEpoch(id, label) }, label))),
+      h("h3", {}, "Labels classiques"),
+      h("div", { class: "chips" }, CLASSICAL_LABELS.map((l) => h("button", { class: "chip", onclick: () => openLabelByName(l) }, l))),
+      h("h3", {}, "En ce moment sur Deezer"),
+      h("div", { class: "muted small" }, "Les albums classiques les plus écoutés en ce moment."),
+      r.chart,
       h("h3", {}, "Compositeurs populaires"),
       r.popular,
       // Réglages propres à l'extension ou à l'application web.
@@ -587,7 +657,15 @@ window.__dzWorks = function createWorks(ctx) {
         h("input", { type: "checkbox", checked: ctx.prefs().inApp !== false, onchange: (e) => ctx.setPref("inApp", e.target.checked) }),
         " Ouvrir les albums sans recharger la page (décochez si un clic sur un album ne fait rien)")));
     if (!S.popular) call("ooPopularComposers").then((p) => { S.popular = p; schedule(); }).catch(() => {});
+    if (!S.chart) call("dzClassicalChart").then((c) => { S.chart = c; schedule(); }).catch(() => { S.chart = []; });
     setTimeout(() => r.root.querySelector("input")?.focus({ preventScroll: true }), 0);
+  }
+  // Carte d'album simple (classement, etc.) : clic = fiche, ▶ = Deezer.
+  function simpleAlbumCard(a) {
+    return h("div", { class: "item", role: "button", tabindex: "0", title: `${a.title}\n(cliquez pour la fiche de l'album)`,
+      onclick: () => openAlbumDetail(a.id, a), onkeydown: (ev) => { if (ev.key === "Enter") openAlbumDetail(a.id, a); } },
+      h("div", { class: "cover" }, a.cover ? h("img", { src: a.cover, alt: "", loading: "lazy" }) : h("div", { class: "ph" }, (a.title || "?")[0]), playButton(a.id)),
+      h("div", { class: "t" }, a.title), h("div", { class: "a" }, a.artist));
   }
   function composerCard(c) {
     const img = h("img", { src: c.portrait, alt: "", loading: "lazy" });
@@ -627,6 +705,7 @@ window.__dzWorks = function createWorks(ctx) {
       searching && !S.searching && !S.results.length && !S.workHits?.length && !S.artistHits?.length && !S.labelHits?.length ? h("div", { class: "muted" }, "Aucun résultat.") : "",
     ].flat());
     if (r.popular.childElementCount !== (S.popular || []).length) r.popular.replaceChildren(...(S.popular || []).map(composerCard));
+    if (S.chart && r.chart.childElementCount !== S.chart.length) r.chart.replaceChildren(...S.chart.slice(0, 12).map(simpleAlbumCard));
   }
 
   // --- Œuvres d'un type, tous compositeurs, avec filtres --------------------------
@@ -649,7 +728,7 @@ window.__dzWorks = function createWorks(ctx) {
     r.filterBtn = h("button", { class: "btn w-filter-btn", onclick: () => r.root.classList.add("show-filters") }, "Filtres");
     r.root.append(
       h("div", { class: "w-workhead" },
-        crumbs({ label: "Accueil", onclick: () => go("home") }, { label: o.label }),
+        crumbs({ label: "Accueil", onclick: goHome }, { label: o.label }),
         h("h2", {}, o.label), r.status),
       h("div", { class: "w-cols" },
         h("aside", { class: "w-facets" },
@@ -722,7 +801,7 @@ window.__dzWorks = function createWorks(ctx) {
   function buildEpoch(r) {
     r.list = h("div", { class: "w-composers" });
     r.root.append(h("div", { class: "w-scroll" },
-      crumbs({ label: "Accueil", onclick: () => go("home") }, { label: S.epoch.label }),
+      crumbs({ label: "Accueil", onclick: goHome }, { label: S.epoch.label }),
       h("h2", {}, S.epoch.label), r.list));
   }
   function patchEpoch(r) {
@@ -739,11 +818,11 @@ window.__dzWorks = function createWorks(ctx) {
     r.list = h("div", { class: "w-works" });
     r.count = h("span", { class: "muted small" });
     r.root.append(h("div", { class: "w-scroll" },
-      crumbs({ label: "Accueil", onclick: () => go("home") }, { label: c.complete_name || c.name }),
+      crumbs({ label: "Accueil", onclick: goHome }, { label: c.complete_name || c.name }),
       h("div", { class: "w-composer-head" },
         c.portrait ? h("img", { src: c.portrait, alt: "" }) : null,
         h("div", {}, h("h2", {}, c.complete_name || c.name),
-          h("div", { class: "muted" }, [c.birth && `${c.birth}–${c.death || ""}`, c.epoch].filter(Boolean).join(" · ")))),
+          h("div", { class: "muted" }, [c.birth && `${c.birth}–${c.death || ""}`, EPOCH_FR[c.epoch] || c.epoch].filter(Boolean).join(" · ")))),
       h("div", { class: "w-toolbar" },
         h("input", { type: "search", placeholder: "Filtrer les œuvres : concerto, op. 18, sonate…", value: S.wf.text,
           oninput: (e) => { S.wf.text = e.target.value; patchComposer(r); } }),
@@ -809,7 +888,7 @@ window.__dzWorks = function createWorks(ctx) {
     r.count = h("span", { class: "muted small" });
     r.root.append(
       h("div", { class: "w-workhead" },
-        crumbs({ label: "Accueil", onclick: () => go("home") }, { label: c.complete_name || c.name, onclick: () => (S.works ? go("composer") : openComposer(c)) }, { label: w.title }),
+        crumbs({ label: "Accueil", onclick: goHome }, { label: c.complete_name || c.name, onclick: () => openComposer(c) }, { label: w.title }),
         h("h2", {}, w.title), r.movs = h("div", { class: "w-movs" }), r.status),
       h("div", { class: "w-cols" },
         facetsBox,
@@ -998,7 +1077,7 @@ window.__dzWorks = function createWorks(ctx) {
     r.filterBtn = h("button", { class: "btn w-filter-btn", onclick: () => r.root.classList.add("show-filters") }, "Filtres");
     r.root.append(
       h("div", { class: "w-workhead" },
-        crumbs({ label: "Accueil", onclick: () => go("home") }, { label: A.info.name }), r.head, r.status),
+        crumbs({ label: "Accueil", onclick: goHome }, { label: A.info.name }), r.head, r.status),
       h("div", { class: "w-cols" },
         h("aside", { class: "w-facets" },
           h("div", { class: "w-facets-head" }, h("span", { class: "strong" }, "Filtres"),
@@ -1114,8 +1193,9 @@ window.__dzWorks = function createWorks(ctx) {
     const key = `${!!V.album}|${V.recs.map((x) => (x === undefined ? "?" : x ? 1 : 0)).join("")}|${V.error || ""}|${V.done}`;
     if (r.body.dataset.key === key) return;
     r.body.dataset.key = key;
-    const backLabel = { work: "Retour aux enregistrements", artist: "Retour à l'interprète", omni: "Retour à la liste", epoch: "Retour à la liste", label: "Retour au label",
-      composer: "Retour au compositeur", home: "Retour à l'accueil" }[V.prev?.view] || "Retour";
+    const backLabel = { work: "Retour aux enregistrements", artist: "Retour à l'interprète", omni: "Retour à la liste", browse: "Retour au catalogue",
+      epoch: "Retour à la liste", label: "Retour au label", album: "Retour à l'album précédent", composer: "Retour au compositeur",
+      home: "Retour à l'accueil" }[backTarget()] || "Retour";
 
     // Interprètes : rôles MusicBrainz quand on les connaît, sinon les artistes Deezer.
     const contribs = a.contribs || (a.contributors || []).map((name) => ({ name }));
@@ -1142,7 +1222,7 @@ window.__dzWorks = function createWorks(ctx) {
     const y = (a.date || "").slice(0, 4);
     const cover = a.cover ? h("img", { src: (a.cover || "").replace("250x250", "500x500"), alt: "" }) : h("div", { class: "ph" }, (a.title || "?")[0]);
     r.body.replaceChildren(
-      h("div", { class: "w-toolbar" }, h("button", { class: "btn", onclick: backFromAlbum }, `← ${backLabel}`)),
+      h("div", { class: "w-toolbar" }, h("button", { class: "btn", onclick: goBack }, `← ${backLabel}`)),
       h("div", { class: "w-album-head" },
         h("div", { class: "cover big" }, cover),
         h("div", { class: "w-album-info" },
@@ -1202,8 +1282,7 @@ window.__dzWorks = function createWorks(ctx) {
 
   function buildLabel(r) {
     const V = S.labelView;
-    const back = V.prev && V.prev.view !== "home" ? h("button", { class: "btn", onclick: () => { restoreKey = V.prev.key; go(V.prev.view); } },
-      `← ${V.prev.view === "album" ? "Retour à l'album" : "Retour"}`) : "";
+    const back = canGoBack() ? h("button", { class: "btn", onclick: goBack }, `← ${backTarget() === "album" ? "Retour à l'album" : "Retour"}`) : "";
     if (V.resolving || V.candidates || V.error && !V.infosLoaded) {
       r.body = h("div", { class: "w-scroll" });
       r.root.append(r.body);
@@ -1211,7 +1290,7 @@ window.__dzWorks = function createWorks(ctx) {
         V.resolving ? h("div", { class: "muted" }, "Recherche du label dans MusicBrainz…") : "",
         V.error ? h("div", { class: "error" }, V.error) : "",
         V.candidates ? [h("div", { class: "muted" }, V.candidates.length ? "Plusieurs labels possibles : choisissez." : "Label introuvable dans MusicBrainz."),
-          h("div", { class: "w-works" }, V.candidates.map((l) => h("button", { class: "w-work", onclick: () => openLabels([l.id], { prev: V.prev }) },
+          h("div", { class: "w-works" }, V.candidates.map((l) => h("button", { class: "w-work", onclick: () => openLabels([l.id], { push: false }) },
             h("div", {}, h("div", { class: "strong" }, l.name), h("div", { class: "muted small" }, [l.disambiguation, l.type, l.country, l.catno].filter(Boolean).join(" · "))))))] : ""].flat());
       r.resolveOnly = true;
       return;
@@ -1225,8 +1304,8 @@ window.__dzWorks = function createWorks(ctx) {
     r.title = h("h2", {});
     r.filterBtn = h("button", { class: "btn w-filter-btn", onclick: () => r.root.classList.add("show-filters") }, "Filtres");
     r.root.append(
-      h("div", { class: "w-workhead" }, back,
-        crumbs({ label: "Accueil", onclick: () => go("home") }, { label: "Label" }), r.title, r.chips, r.status),
+      h("div", { class: "w-workhead" },
+        crumbs({ label: "Accueil", onclick: goHome }, { label: "Label" }), r.title, r.chips, r.status),
       h("div", { class: "w-cols" },
         h("aside", { class: "w-facets" },
           h("div", { class: "w-facets-head" }, h("span", { class: "strong" }, "Filtres"),
@@ -1359,6 +1438,187 @@ window.__dzWorks = function createWorks(ctx) {
       h("div", { class: "t" }, a.title || g.title),
       h("div", { class: "a" }, g.artist || a.artist),
       h("div", { class: "m" }, [(g.date || "").slice(0, 4), catnos.slice(0, 2).join(", ")].filter(Boolean).join(" · ")));
+  }
+
+  // --- Catalogue des œuvres (index local d'Open Opus), filtres combinables -------------
+  let INDEX = null, indexPort = null, indexProgress = null, browseSeq = 0;
+  const KEY_FR = { c: "ut", d: "ré", e: "mi", f: "fa", g: "sol", a: "la", b: "si" };
+  function keyFr(title) {
+    const m = title.match(/\bin ([A-G])(?:[ -](flat|sharp))? (major|minor)\b/i);
+    if (!m) return "";
+    return `${KEY_FR[m[1].toLowerCase()]}${m[2] ? (m[2].toLowerCase() === "flat" ? " bémol" : " dièse") : ""} ${m[3].toLowerCase() === "major" ? "majeur" : "mineur"}`;
+  }
+  // Formation déduite du genre et du titre.
+  function formationOf(w) {
+    const t = ` ${norm(`${w.title} ${w.subtitle}`)} `;
+    if (w.genre === "Stage") return "Scène (opéra, ballet)";
+    if (/\b(concerto|concertino|konzertstuck)\b/.test(t) && !/\bconcerto grosso\b/.test(t)) return "Soliste et orchestre";
+    if (w.genre === "Orchestral") return "Orchestre";
+    if (w.genre === "Vocal") return /\b(mass|missa|requiem|cantata|oratorio|magnificat|psalm|motet|stabat|te deum|vespers|chorus|choir|choral|anthem|passion|hymn)\b/.test(t)
+      ? "Chœur" : "Voix (mélodies, lieder, airs)";
+    if (w.genre === "Keyboard") return "Clavier seul";
+    if (w.genre === "Chamber") {
+      if (/\b(solo|unaccompanied)\b/.test(t)) return "Instrument seul";
+      if (/\btrio\b/.test(t)) return "Trio";
+      if (/\bquartet\b/.test(t)) return "Quatuor";
+      if (/\bquintet\b/.test(t)) return "Quintette";
+      if (/\b(sextet|septet|octet|nonet)\b/.test(t)) return "Sextuor et plus";
+      if (/\b(duo|sonata|sonatina|suite for [a-z]+ and)\b|\bfor [a-z]+ and (piano|harpsichord|continuo|guitar|organ)\b/.test(t)) return "Duo";
+      return "Musique de chambre (autre)";
+    }
+    return "";
+  }
+  function indexValues(w, c) {
+    let instruments = titleTags(`${w.title} ${w.subtitle}`, INSTRUMENTS);
+    // Œuvres pour clavier sans instrument dans le titre (« Nocturne », « Ballade ») :
+    // piano après le baroque, clavecin avant ; œuvres vocales : voix.
+    // Avant le classicisme, les formes typiques de l'orgue (choral, toccata, fugue…) désignent l'orgue.
+    if (!instruments.length && w.genre === "Keyboard") {
+      const early = ["Medieval", "Renaissance", "Baroque"].includes(c?.epoch);
+      const organish = /\b(chorale|choral|toccata|fugue|fuga|passacaglia|pastorale|voluntary|canzona|orgelbuchlein|trio sonata|magnificat|hymn|kyrie|ricercar|fantasia and fugue|prelude and fugue)/i.test(norm(`${w.title} ${w.subtitle}`))
+        && !/well tempered|clavier|klavier|suite|partita|invention/i.test(norm(w.title));
+      instruments = [early ? (organish ? "Orgue" : "Clavecin") : "Piano"];
+    }
+    if (!instruments.length && w.genre === "Vocal") instruments = [formationOf(w) === "Chœur" ? "Chœur" : "Voix"];
+    return {
+      epoch: [EPOCH_FR[c?.epoch] || c?.epoch].filter(Boolean),
+      composer: [c?.complete_name || c?.name].filter(Boolean),
+      genre: [GENRES[w.genre] || w.genre].filter(Boolean),
+      formation: [formationOf(w)].filter(Boolean),
+      form: titleTags(w.title, FORMS),
+      instrument: instruments,
+      key: [keyFr(w.title)].filter(Boolean),
+    };
+  }
+  function ensureIndex() {
+    if (INDEX || indexPort) return;
+    indexPort = chrome.runtime.connect({ name: "index" });
+    indexPort.onMessage.addListener((m) => {
+      if (m.kind === "progress") indexProgress = m;
+      else if (m.kind === "index") {
+        const byId = new Map(m.index.composers.map((c) => [c.id, c]));
+        INDEX = m.index.works.map((w) => { const c = byId.get(w.c); return { w, c, v: indexValues(w, c), text: norm(`${w.title} ${w.subtitle} ${c?.complete_name || ""}`) }; });
+        indexPort.disconnect(); indexPort = null;
+      } else if (m.kind === "error") { indexProgress = { error: m.error }; indexPort = null; }
+      schedule();
+    });
+    indexPort.postMessage({ cmd: "build" });
+  }
+
+  const BROWSE_FACETS = [["epoch", "Époque"], ["genre", "Genre"], ["formation", "Formation"], ["instrument", "Instrument"], ["form", "Forme"],
+    ["composer", "Compositeur"], ["key", "Tonalité"]];
+
+  function openBrowse(label, preset = {}, { essential = false } = {}) {
+    const sel = {};
+    for (const [k, vals] of Object.entries(preset)) sel[k] = new Set(vals);
+    go("browse", { browse: { id: ++browseSeq, label, sel, open: {}, text: "", essential, sort: "relevance", shown: 100 } });
+    ensureIndex();
+  }
+
+  function buildBrowse(r) {
+    const B = S.browse;
+    r.status = h("div", { class: "muted small" });
+    r.facets = h("div", { class: "w-facets-body" });
+    r.list = h("div", { class: "w-works" });
+    r.tail = h("div", { class: "tail" });
+    r.count = h("span", { class: "muted small" });
+    r.title = h("h2", {});
+    r.active = h("div", { class: "chips" });
+    r.filterBtn = h("button", { class: "btn w-filter-btn", onclick: () => r.root.classList.add("show-filters") }, "Filtres");
+    r.root.append(
+      h("div", { class: "w-workhead" }, crumbs({ label: "Accueil", onclick: goHome }, { label: "Catalogue des œuvres" }), r.title, r.active, r.status),
+      h("div", { class: "w-cols" },
+        h("aside", { class: "w-facets" },
+          h("div", { class: "w-facets-head" }, h("span", { class: "strong" }, "Filtres"),
+            h("button", { class: "btn primary", onclick: () => r.root.classList.remove("show-filters") }, "Voir les résultats")),
+          r.facets),
+        h("section", { class: "w-results" },
+          h("div", { class: "w-toolbar" },
+            r.filterBtn,
+            h("input", { type: "search", placeholder: "Filtrer : titre, compositeur, op. …", value: B.text,
+              oninput: (e) => { B.text = e.target.value; B.shown = 100; patchBrowse(r); } }),
+            h("label", { class: "small" }, h("input", { type: "checkbox", checked: B.essential,
+              onchange: (e) => { B.essential = e.target.checked; B.shown = 100; patchBrowse(r); } }), " ★ Incontournables seulement"),
+            h("span", { class: "select" }, h("select", { onchange: (e) => { B.sort = e.target.value; patchBrowse(r); } },
+              [["relevance", "Incontournables d'abord"], ["epoch", "Par époque"], ["composer", "Par compositeur"], ["title", "Par titre"]]
+                .map(([v, t]) => h("option", { value: v, selected: B.sort === v }, t)))),
+            r.count),
+          r.list, r.tail)));
+  }
+
+  function patchBrowse(r) {
+    const B = S.browse;
+    // Titre : déduit des filtres choisis, ou celui du raccourci.
+    const chosen = Object.entries(B.sel).flatMap(([k, set]) => [...(set || [])].map((v) => [k, v]));
+    r.title.textContent = B.label || "Catalogue des œuvres";
+    const activeKey = chosen.map((x) => x.join(":")).join("|") + B.essential;
+    if (r.active.dataset.key !== activeKey) {
+      r.active.dataset.key = activeKey;
+      r.active.replaceChildren(...chosen.map(([k, v]) => h("button", { class: "chip toggle on", title: "Retirer ce filtre",
+        onclick: () => { B.sel[k].delete(v); B.label = ""; B.shown = 100; patchBrowse(r); } }, v, h("span", { class: "muted" }, " ✕"))),
+        ...(B.essential ? [h("button", { class: "chip toggle on", onclick: () => { B.essential = false; patchBrowse(r); } }, "★ Incontournables", h("span", { class: "muted" }, " ✕"))] : []));
+    }
+    if (!INDEX) {
+      const p = indexProgress;
+      r.status.textContent = p?.error ? `Erreur : ${p.error}` : `Préparation du catalogue (une seule fois, environ 30 secondes)… ${p ? `${p.done} / ${p.total} compositeurs` : ""}`;
+      r.list.replaceChildren(); r.facets.replaceChildren(); r.count.textContent = "";
+      return;
+    }
+    r.status.textContent = `${INDEX.length} œuvres de ${new Set(INDEX.map((x) => x.c?.id)).size} compositeurs (Open Opus)`;
+    const q = norm(B.text);
+    const pass = (x, except) => {
+      if (B.essential && !x.w.popular && !x.w.recommended) return false;
+      if (q && !x.text.includes(q)) return false;
+      for (const [k] of BROWSE_FACETS) {
+        if (k === except) continue;
+        const set = B.sel[k];
+        if (set?.size && !x.v[k].some((v) => set.has(v))) return false;
+      }
+      return true;
+    };
+    const order = {
+      epoch: (v) => EPOCHS.findIndex(([, fr]) => fr === v), formation: (v) => FORMATIONS.indexOf(v), genre: (v) => Object.values(GENRES).indexOf(v),
+    };
+    r.facets.replaceChildren(...BROWSE_FACETS.map(([k, label]) => {
+      const counts = new Map();
+      for (const x of INDEX) if (pass(x, k)) for (const v of x.v[k]) counts.set(v, (counts.get(v) || 0) + 1);
+      const set = B.sel[k] || new Set();
+      for (const v of set) if (!counts.has(v)) counts.set(v, 0);
+      if (!counts.size) return "";
+      const items = [...counts.entries()].sort(order[k] ? (a, b) => order[k](a[0]) - order[k](b[0]) : (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      const full = order[k] && k !== "genre" ? true : B.open[k];
+      const limit = full ? items.length : 8;
+      return h("div", { class: "w-facet" },
+        h("div", { class: "w-facet-title" }, label, set.size ? h("button", { class: "link small", onclick: () => { B.sel[k] = new Set(); B.label = ""; B.shown = 100; patchBrowse(r); } }, "effacer") : ""),
+        items.filter(([v], i) => i < limit || set.has(v)).map(([v, n]) => h("label", { class: `w-opt${set.has(v) ? " on" : ""}` },
+          h("input", { type: "checkbox", checked: set.has(v), onchange: (e) => {
+            const s2 = B.sel[k] || (B.sel[k] = new Set());
+            e.target.checked ? s2.add(v) : s2.delete(v);
+            B.label = ""; B.shown = 100;
+            patchBrowse(r);
+          } }),
+          h("span", { class: "v" }, v), h("span", { class: "n" }, n))),
+        !full && items.length > 8 ? h("button", { class: "link small", onclick: () => { B.open[k] = !B.open[k]; patchBrowse(r); } }, B.open[k] ? "moins" : `+ ${items.length - 8} autres`) : "");
+    }));
+    if (!B.label) r.title.textContent = chosen.length ? chosen.map(([, v]) => v).join(" · ") : (B.essential ? "Les incontournables" : "Toutes les œuvres");
+
+    const ep = (x) => EPOCHS.findIndex(([id]) => id === x.c?.epoch);
+    const by = {
+      relevance: (a, b) => ((b.w.recommended ? 2 : 0) + (b.w.popular ? 1 : 0)) - ((a.w.recommended ? 2 : 0) + (a.w.popular ? 1 : 0)) || ep(a) - ep(b) || (a.c?.name || "").localeCompare(b.c?.name || ""),
+      epoch: (a, b) => ep(a) - ep(b) || (a.c?.name || "").localeCompare(b.c?.name || "") || a.w.title.localeCompare(b.w.title, undefined, { numeric: true }),
+      composer: (a, b) => (a.c?.name || "").localeCompare(b.c?.name || "") || a.w.title.localeCompare(b.w.title, undefined, { numeric: true }),
+      title: (a, b) => a.w.title.localeCompare(b.w.title, undefined, { numeric: true }),
+    };
+    const list = INDEX.filter((x) => pass(x)).sort(by[B.sort] || by.relevance);
+    const active = Object.values(B.sel).reduce((n, set) => n + (set?.size || 0), 0) + (B.essential ? 1 : 0);
+    r.filterBtn.textContent = active ? `Filtres (${active})` : "Filtres";
+    r.count.textContent = `${list.length} œuvre${list.length > 1 ? "s" : ""}`;
+    const visible = list.slice(0, B.shown);
+    const key = `${B.sort}|${visible.map((x) => x.w.id).join(",")}`;
+    if (r.list.dataset.key !== key) { r.list.dataset.key = key; r.list.replaceChildren(...visible.map((x) => workRow(x.c, x.w))); }
+    r.tail.replaceChildren(
+      !list.length ? h("div", { class: "muted empty" }, "Aucune œuvre ne correspond à ces filtres.") : "",
+      list.length > B.shown ? h("button", { class: "btn more", onclick: () => { B.shown += 100; patchBrowse(r); } }, `Afficher plus (${list.length - B.shown} restantes)`) : "");
   }
 
   return {

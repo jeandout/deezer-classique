@@ -114,6 +114,9 @@ select option { background: var(--bg); color: var(--fg); }
 .w-composer-head img { width: 88px; height: 88px; border-radius: 50%; object-fit: cover; }
 .w-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; color: var(--mut); }
 .w-crumbs .cur { color: var(--fg); }
+.w-back { border: 0; background: var(--bg2); color: var(--fg); width: 30px; height: 30px; border-radius: 50%; cursor: pointer;
+  font-size: 15px; display: inline-grid; place-items: center; margin-right: 4px; }
+.w-back:hover { background: var(--bg3); }
 .w-crumbs .sep { opacity: .6; }
 .w-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .w-toolbar input[type=search] { flex: 1 1 320px; }

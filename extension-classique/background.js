@@ -4,7 +4,7 @@
 
 const MB = "https://musicbrainz.org/ws/2";
 const DZ = "https://api.deezer.com";
-const USER_AGENT = "DeezerClassique/0.9 (extension personnelle)";
+const USER_AGENT = "DeezerClassique/0.10 (extension personnelle)";
 
 const DAY = 24 * 3600 * 1000;
 const TTL = {};

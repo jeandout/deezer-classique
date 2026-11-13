@@ -656,8 +656,40 @@ async function loadAlbumDetail(albumId, send, isCancelled) {
   send({ kind: "done" });
 }
 
+// --- Index local de toutes les œuvres d'Open Opus -----------------------------------
+// ~220 compositeurs, une requête chacun (en cache 30 jours) : permet de parcourir et
+// de combiner instantanément instrument, formation, genre, forme, époque, tonalité.
+async function buildWorksIndex(send, isCancelled) {
+  const hit = await cacheGet("ooindex", TTL.ooWorks);
+  if (hit) { send({ kind: "index", index: hit }); return; }
+  const composers = await cached("ooall", TTL.ooComposers, async () =>
+    ((await oo("/composer/list/name/all.json")).composers || []).map(compactComposer));
+  const works = [];
+  let n = 0;
+  for (const c of composers) {
+    if (isCancelled()) return;
+    try {
+      const d = await ooWorks(c.id);
+      for (const w of d.works) works.push({ ...w, c: c.id });
+    } catch { /* compositeur indisponible : ignoré */ }
+    send({ kind: "progress", done: ++n, total: composers.length });
+  }
+  const index = { composers, works, t: Date.now() };
+  await cacheSet("ooindex", index);
+  send({ kind: "index", index });
+}
+
+// Albums classiques du moment sur Deezer (classement du genre Classique).
+async function dzClassicalChart() {
+  return cached("dzchart98", 6 * 3600 * 1000, async () => {
+    const d = await dz("/chart/98/albums?limit=24", true);
+    return (d.data || []).map((a) => ({ id: a.id, title: a.title, cover: a.cover_medium || "", artist: a.artist?.name || "" }));
+  });
+}
+
 // --- Messages ------------------------------------------------------------------
 const worksHandlers = {
+  dzClassicalChart: () => dzClassicalChart(),
   ooOmni: (msg) => ooOmni(msg.q, msg.offset || 0),
   ooEpoch: (msg) => ooEpoch(msg.epoch),
   dzArtistSearch: (msg) => dzArtistSearch(msg.q),
@@ -666,6 +698,18 @@ const worksHandlers = {
   ooWorks: (msg) => (String(msg.composerId).startsWith("mb:") ? mbWorks(String(msg.composerId).slice(3)) : ooWorks(msg.composerId)),
   mbComposerSearch: (msg) => mbComposerSearch(msg.q),
 };
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "index") return;
+  let closed = false;
+  port.onDisconnect.addListener(() => { closed = true; });
+  const send = (m) => { if (!closed) port.postMessage(m); };
+  port.onMessage.addListener(async (m) => {
+    if (m.cmd !== "build") return;
+    try { await buildWorksIndex(send, () => closed); }
+    catch (e) { send({ kind: "error", error: String(e.message || e) }); }
+  });
+});
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "album") return;
