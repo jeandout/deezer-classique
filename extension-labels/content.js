@@ -24,7 +24,7 @@
       else if (k === "html") el.innerHTML = v;
       else el.setAttribute(k, v === true ? "" : v);
     }
-    for (const c of children.flat(Infinity)) {
+    for (const c of children.flat()) {
       if (c == null || c === false) continue;
       el.append(c.nodeType ? c : document.createTextNode(String(c)));
     }
@@ -58,8 +58,7 @@
   // --- État ----------------------------------------------------------------
   const state = {
     open: false,
-    mode: "works",       // "works" (recherche classique) | "labels"
-    view: "home",        // mode labels : "home" | "label"
+    view: "home",        // "home" | "label"
     album: null,         // album Deezer de la page courante
     suggestions: null,   // labels proposés pour cet album
     searchResults: null,
@@ -85,39 +84,10 @@
   sheet.replaceSync(CSS());
   root.adoptedStyleSheets = [sheet];
 
-  // Deux boutons flottants : recherche classique, et label de l'album affiché.
-  const worksTab = h("button", { class: "tab", title: "Recherche classique : compositeurs, œuvres, interprètes", onclick: () => toggle(true, "works") },
-    h("span", { class: "tab-icon" }, "🎼"), h("span", { class: "tab-text" }, "Classique"));
-  const tab = h("button", { class: "tab", title: "Catalogue du label", onclick: () => toggle(true, "labels") });
-  const tabs = h("div", { class: "tabs-float" }, worksTab, tab);
-  const panel = h("aside", { class: "panel", "aria-label": "Deezer Classique" });
-  const worksEl = h("div", { class: "w-host" });
-  root.append(tabs, panel);
+  const tab = h("button", { class: "tab", title: "Catalogue du label", onclick: () => toggle() });
+  const panel = h("aside", { class: "panel", "aria-label": "Catalogues de labels" });
+  root.append(tab, panel);
   document.documentElement.append(host);
-
-  // Le panneau s'arrête au-dessus de la barre de lecture de Deezer.
-  function playerHeight() {
-    const prev = host.style.display;
-    host.style.display = "none";
-    let el = document.elementFromPoint(innerWidth / 2, innerHeight - 4);
-    let best = 0;
-    while (el && el !== document.body && el !== document.documentElement) {
-      const r = el.getBoundingClientRect();
-      if (r.bottom >= innerHeight - 2 && r.height < 220 && r.width > innerWidth * 0.6) best = Math.max(best, r.height);
-      el = el.parentElement;
-    }
-    host.style.display = prev;
-    return Math.round(best);
-  }
-  const placePanel = () => host.style.setProperty("--player", `${playerHeight()}px`);
-  addEventListener("resize", () => { if (state.open) placePanel(); });
-  addEventListener("keydown", (e) => { if (e.key === "Escape" && state.open) toggle(false); });
-
-  let works = null;
-  const getWorks = () => works || (works = window.__dzWorks({
-    h, call, norm, lang, openAlbum: (id, ev) => openAlbum(id, ev),
-    schedule: (now) => (now ? render() : scheduleRender()),
-  }));
 
   // --- Charte graphique : on reprend la police et les couleurs de la page ---
   // (thème clair ou sombre de Deezer), relues à chaque affichage du panneau.
@@ -179,25 +149,13 @@
   }
 
   // --- Ouverture / fermeture -----------------------------------------------
-  function toggle(force, mode) {
+  function toggle(force) {
     state.open = force ?? !state.open;
-    if (mode) setMode(mode, false);
     panel.classList.toggle("open", state.open);
-    tabs.classList.toggle("hidden", state.open);
+    tab.classList.toggle("hidden", state.open);
     if (state.open) {
       syncTheme();
-      placePanel();
-      if (state.mode === "labels" && state.view === "home" && state.album && !state.suggestions) suggestFromAlbum();
-      else render();
-    }
-  }
-
-  function setMode(mode, rerender = true) {
-    state.mode = mode;
-    state.prefs.mode = mode;
-    call("setPrefs", { prefs: { mode } }).catch(() => {});
-    if (rerender) {
-      if (mode === "labels" && state.view === "home" && state.album && !state.suggestions) suggestFromAlbum();
+      if (state.view === "home" && state.album && !state.suggestions) suggestFromAlbum();
       else render();
     }
   }
@@ -278,11 +236,9 @@
     state.view = "home";
     state.suggestions = null;
     state.open = true;
-    state.mode = "labels";
     panel.classList.add("open");
-    tabs.classList.add("hidden");
+    tab.classList.add("hidden");
     syncTheme();
-    placePanel();
     if (state.album && albumIdFromUrl() === String(state.album.id)) return suggestFromAlbum(name);
     state.lastQ = name;
     return searchLabels(name, true);
@@ -496,15 +452,6 @@
   function render() {
     if (!state.open) return;
     syncTheme();
-    if (state.mode === "works") {
-      // Le mode Œuvres gère lui-même son contenu (construit une fois, puis mis à jour sur place).
-      const head = header();
-      if (panel.children[1] === worksEl) panel.firstElementChild.replaceWith(head);
-      else panel.replaceChildren(head, worksEl);
-      lastFullKey = "";
-      getWorks().render(worksEl);
-      return;
-    }
     // Vue « label » déjà affichée et structure inchangée : simple mise à jour.
     const fullKey = state.view === "label"
       ? JSON.stringify([state.labelIds, (state.off || []).map((o) => o.id), state.infosLoaded, state.expanding,
@@ -540,15 +487,12 @@
   }
 
   function header() {
-    const labels = state.mode === "labels";
-    const modeBtn = (m, label) => h("button", { class: `mode${state.mode === m ? " on" : ""}`, onclick: () => { if (state.mode !== m) setMode(m); } }, label);
     return h("header", { class: "head" },
-      h("nav", { class: "modes" }, modeBtn("works", "Œuvres"), modeBtn("labels", "Labels")),
-      labels && state.view === "label"
+      state.view === "label"
         ? h("button", { class: "icon-btn", title: "Retour", onclick: () => { state.view = "home"; if (port) port.disconnect(); port = null; render(); } }, "←")
         : null,
-      h("div", { class: "head-title" }, labels ? (state.view === "label" ? viewTitle() : "Catalogues de labels") : ""),
-      h("button", { class: "icon-btn", title: "Fermer (Échap)", onclick: () => toggle(false) }, "✕"));
+      h("div", { class: "head-title" }, state.view === "label" ? viewTitle() : "Catalogues de labels"),
+      h("button", { class: "icon-btn", title: "Fermer", onclick: () => toggle(false) }, "✕"));
   }
 
   function labelRow(l, note) {
@@ -824,16 +768,14 @@
 }
 * { box-sizing: border-box; }
 .tab, .panel, button, input, select { font-family: var(--font), sans-serif; }
-.tabs-float { position: fixed; right: 0; top: 34%; z-index: 2147483646; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
-.tabs-float.hidden { display: none; }
-.tab { display: flex; align-items: center; gap: 6px;
+.tab { position: fixed; right: 0; top: 38%; z-index: 2147483646; display: flex; align-items: center; gap: 6px;
   max-width: 220px; padding: 10px 14px 10px 12px; border: 0; border-radius: 999px 0 0 999px; cursor: pointer;
   background: var(--acc); color: #fff; font-size: 13px; font-weight: 700; line-height: 1.2;
   box-shadow: 0 4px 16px rgba(0,0,0,.3); }
 .tab:hover { filter: brightness(1.08); }
 .tab.hidden { display: none; }
 .tab-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.panel { position: fixed; top: 0; right: 0; bottom: var(--player, 0px); z-index: 2147483647; width: min(1280px, calc(100vw - 24px));
+.panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 2147483647; width: min(580px, 100vw);
   display: none; flex-direction: column; background: var(--bg); color: var(--fg);
   font-size: 14px; line-height: 1.43; border-left: 1px solid var(--line); box-shadow: -12px 0 40px rgba(0,0,0,.35); }
 .panel.open { display: flex; }
@@ -906,71 +848,11 @@ select option { background: var(--bg); color: var(--fg); }
   border: 1.5px solid var(--mut); font-size: 10px; line-height: 1; color: #fff; }
 .chip.on .box { background: var(--acc); border-color: var(--acc); }
 .plus { color: var(--acc); font-weight: 700; }
-/* --- Onglets de mode --- */
-.modes { display: flex; gap: 4px; background: var(--bg2); border-radius: 999px; padding: 4px; }
-.mode { border: 0; background: none; color: var(--mut); font-size: 14px; font-weight: 700; padding: 6px 16px; border-radius: 999px; cursor: pointer; }
-.mode.on { background: var(--bg); color: var(--fg); box-shadow: 0 1px 4px rgba(0,0,0,.2); }
-.mode:hover:not(.on) { color: var(--fg); }
-/* --- Mode Œuvres --- */
-.w-host, .w-root { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.w-scroll { flex: 1; overflow-y: auto; padding: 4px 24px 32px; display: flex; flex-direction: column; gap: 14px; }
-.w-scroll h2, .w-workhead h2 { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -.01em; }
-.w-big { height: 52px !important; font-size: 18px !important; padding: 0 22px !important; }
-.w-composers { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
-.w-composer { display: flex; align-items: center; gap: 12px; text-align: left; background: none; border: 0; color: var(--fg);
-  padding: 8px; border-radius: 8px; cursor: pointer; font-size: 14px; }
-.w-composer:hover { background: var(--bg2); }
-.w-composer img, .w-composer .ph { width: 52px; height: 52px; border-radius: 50%; object-fit: cover; flex: none; font-size: 22px; background: var(--bg3); }
-.w-composer-head { display: flex; align-items: center; gap: 18px; }
-.w-composer-head img { width: 88px; height: 88px; border-radius: 50%; object-fit: cover; }
-.w-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; color: var(--mut); }
-.w-crumbs .cur { color: var(--fg); }
-.w-crumbs .sep { opacity: .6; }
-.w-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.w-toolbar input[type=search] { flex: 1 1 320px; }
-.w-toolbar label { display: flex; align-items: center; gap: 6px; }
-.w-toolbar input[type=checkbox] { accent-color: var(--acc); }
-.w-chiprows { display: flex; flex-direction: column; gap: 8px; }
-.w-chiprow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.w-chiprow .lbl { width: 84px; flex: none; }
-.chip.sel { background: var(--acc); color: #fff; }
-.chip .n { opacity: .65; font-weight: 500; font-size: 12px; }
-.w-works { display: flex; flex-direction: column; }
-.w-work { display: flex; align-items: center; justify-content: space-between; gap: 12px; text-align: left; background: none; border: 0;
-  border-bottom: 1px solid var(--line); color: var(--fg); padding: 12px 8px; cursor: pointer; font-size: 14px; }
-.w-work:hover { background: var(--bg2); }
-.w-work .star { color: var(--acc); }
-.tag { font-size: 12px; color: var(--mut); background: var(--bg2); border-radius: 999px; padding: 3px 10px; white-space: nowrap; }
-.w-workhead { padding: 4px 24px 12px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--line); }
-.w-status { display: flex; flex-direction: column; gap: 6px; }
-.w-cols { flex: 1; min-height: 0; display: grid; grid-template-columns: 270px 1fr; }
-.w-facets { overflow-y: auto; padding: 16px 16px 32px 24px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 18px; }
-.w-results { overflow-y: auto; padding: 16px 24px 32px 20px; display: flex; flex-direction: column; gap: 16px; }
-.w-facet { display: flex; flex-direction: column; gap: 2px; }
-.w-facet-title { display: flex; justify-content: space-between; align-items: baseline; font-weight: 700; font-size: 14px; margin-bottom: 4px; }
-.w-opt { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 6px; cursor: pointer; font-size: 13px; }
-.w-opt:hover { background: var(--bg2); }
-.w-opt input { accent-color: var(--acc); flex: none; margin: 0; }
-.w-opt .v { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.w-opt .n { color: var(--mut); font-size: 12px; }
-.w-opt.on .v { font-weight: 700; }
-.w-facet .link { align-self: flex-start; margin-top: 2px; }
-.w-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
-.cover { position: relative; }
-.w-badge { position: absolute; left: 6px; top: 6px; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(0,0,0,.65); color: #fff; }
-.m.rec { color: color-mix(in srgb, var(--acc) 55%, var(--mut)); }
-@media (max-width: 760px) {
-  .w-cols { grid-template-columns: 1fr; overflow-y: auto; }
-  .w-facets, .w-results { overflow: visible; border-right: 0; }
-}
 `;
   }
 
   // --- Démarrage -----------------------------------------------------------
-  call("getPrefs").then((p) => {
-    state.prefs = { inApp: true, recent: [], ...p };
-    if (p.mode) state.mode = p.mode;
-  }).catch(() => {});
+  call("getPrefs").then((p) => { state.prefs = { inApp: true, recent: [], ...p }; }).catch(() => {});
   renderTab();
   onUrlChange();
 })();

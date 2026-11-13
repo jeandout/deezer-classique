@@ -24,9 +24,94 @@ const compactComposer = (c) => ({
 async function ooComposerSearch(q) {
   const t = q.trim();
   if (t.length < 3) return [];
-  return cached(`oos:${norm(t)}`, TTL.ooComposers, async () => {
+  return cached(`oos2:${norm(t)}`, TTL.ooComposers, async () => {
     const d = await oo(`/composer/list/search/${encodeURIComponent(t)}.json`);
-    return (d.composers || []).map(compactComposer);
+    const found = (d.composers || []).map(compactComposer);
+    if (found.length) return found;
+    // Faute de frappe (« Rachmaninof », « Shostakovitch ») : recherche approchée
+    // sur la liste complète d'Open Opus (220 compositeurs).
+    const all = await cached("ooall", TTL.ooComposers, async () =>
+      ((await oo("/composer/list/name/all.json")).composers || []).map(compactComposer));
+    const qn = norm(t);
+    const tol = qn.length >= 8 ? 2 : 1;
+    return all.filter((c) => norm(c.complete_name).split(" ").some((w) => w.length > 3 && levenshtein(w, qn) <= tol));
+  });
+}
+
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[n];
+}
+
+// --- Compositeurs absents d'Open Opus : MusicBrainz ------------------------------
+// Recherche approchée (« Reinberger » trouve Rheinberger), limitée aux personnes
+// présentées comme compositeurs.
+async function mbComposerSearch(q) {
+  const t = q.trim().replace(/[()":~^\\/!+-]/g, " ").trim();
+  if (t.length < 3) return [];
+  return cached(`mbcs:${norm(t)}`, TTL.ooComposers, async () => {
+    const terms = norm(t).split(" ").filter(Boolean).map((w) => `${w}~`).join(" AND ");
+    const d = await mb(`/artist?query=${encodeURIComponent(`artist:(${terms}) AND type:person`)}&limit=15`, true);
+    return (d.artists || [])
+      .filter((a) => /compos/i.test(`${a.disambiguation || ""} ${(a.tags || []).map((x) => x.name).join(" ")}`))
+      .slice(0, 8)
+      .map((a) => {
+        const sort = a["sort-name"] || a.name;
+        const last = sort.includes(",") ? sort.split(",")[0].trim() : a.name.split(" ").pop();
+        const full = /[A-Za-z]/.test(a.name) ? a.name : (sort.includes(",") ? sort.split(",").reverse().map((x) => x.trim()).join(" ") : a.name);
+        return {
+          id: `mb:${a.id}`, mbid: a.id, source: "mb", name: last, complete_name: full,
+          epoch: a.disambiguation || "", birth: (a["life-span"]?.begin || "").slice(0, 4),
+          death: (a["life-span"]?.end || "").slice(0, 4), portrait: "",
+        };
+      });
+  });
+}
+
+// Genre déduit du type MusicBrainz ou du titre (MusicBrainz le renseigne rarement).
+function guessGenre(type, title) {
+  const t = ` ${normTitle(title)} `;
+  if (/\b(opera|singspiel|operetta|ballet|incidental)\b/.test(`${(type || "").toLowerCase()} ${t}`)) return "Stage";
+  if (/\b(mass|missa|messe|requiem|stabat|motet|hymn|hymne|cantata|kantate|oratorio|magnificat|psalm|lied|lieder|song|songs|gesang|gesange|chor|chorus|choir|vespers|te deum|ave maria|salve regina|litan)/.test(t)) return "Vocal";
+  if (/\b(concerto|symphony|overture|ouverture|serenade for orchestra|symphonic|sinfonisch\w*|orchestra|orchester)\b/.test(t)) return "Orchestral";
+  if (/\b(organ|orgel|orgelsonate|piano|klavier|harpsichord|toccata|toccatina|fugue|fuge|prelude|praludium|praludien|etude|studie|vortragsstudien|fantasie|fantasia|tonstuck|charakterstuck|monolog|trio sonata)/.test(t)
+    && !/\b(violin|violine|cello|viola|horn|flute|oboe|clarinet|trio|quartet|quintet|sextet)\b/.test(t)) return "Keyboard";
+  if (/\b(quartet|quartett|quintet|quintett|trio|sextet|nonet|octet|sonata|sonate|suite|duo|violin|violine|cello|horn)\b/.test(t)) return "Chamber";
+  return "";
+}
+
+// Œuvres d'un compositeur MusicBrainz : toutes les pages, sans les parties
+// d'œuvres (« op. 180: No. 8. Ländlich »), triées par numéro d'opus.
+async function mbWorks(mbid) {
+  return cached(`mbw:${mbid}`, TTL.ooWorks, async () => {
+    const works = [];
+    let offset = 0, total = Infinity;
+    while (offset < total && offset < 3000) {
+      const d = await mb(`/work?artist=${mbid}&limit=100&offset=${offset}`, true);
+      total = d["work-count"] ?? 0;
+      const page = d.works || [];
+      works.push(...page);
+      offset += page.length;
+      if (!page.length) break;
+    }
+    const seen = new Set();
+    const top = works.filter((w) => !w.title.includes(":") && !seen.has(norm(w.title)) && seen.add(norm(w.title)));
+    const opus = (title) => {
+      const m = normTitle(title).match(/\bop (\d+)/);
+      return m ? +m[1] : 100000;
+    };
+    return {
+      composer: null,
+      works: top
+        .map((w) => ({ id: `mb:${w.id}`, title: w.title, subtitle: w.disambiguation || "", genre: guessGenre(w.type, w.title), popular: false, recommended: false }))
+        .sort((a, b) => opus(a.title) - opus(b.title) || a.title.localeCompare(b.title, undefined, { numeric: true })),
+    };
   });
 }
 
@@ -58,7 +143,8 @@ const TITLE_SYNONYMS = [
   [/\bcellokonzert\b/g, "cello concerto"], [/\bkonzert\b/g, "concerto"],
   [/\bconcerto pour (piano|violon|violoncelle|clarinette|flute|cor|hautbois|basson|trompette)\b/g, (m, i) => `${FR_INSTR[i]} concerto`],
   [/\bconcerto per (pianoforte|violino|violoncello)\b/g, (m, i) => `${IT_INSTR[i]} concerto`],
-  [/\b(sinfonie|symphonie|sinfonia)\b/g, "symphony"], [/\bsonate\b/g, "sonata"],
+  [/\b(sinfonie|symphonie|sinfonia)\b/g, "symphony"], [/\borgelsonate\b/g, "organ sonata"], [/\borgel\b/g, "organ"],
+  [/\bsonate\b/g, "sonata"], [/\bmesse\b/g, "mass"],
   [/\b(streichquartett|quatuor a cordes|quartetto)\b/g, "string quartet"], [/\bquatuor\b/g, "quartet"],
   [/\b(klaviertrio|trio avec piano)\b/g, "piano trio"],
   [/\bkv\b/g, "k"], [/\bopus\b/g, "op"], [/\b(nr|n|num|nos)\b(?= ?\d)/g, "no"],
@@ -295,7 +381,8 @@ async function enrichEntry(entry) {
 const worksHandlers = {
   ooComposerSearch: (msg) => ooComposerSearch(msg.q),
   ooPopularComposers: () => ooPopularComposers(),
-  ooWorks: (msg) => ooWorks(msg.composerId),
+  ooWorks: (msg) => (String(msg.composerId).startsWith("mb:") ? mbWorks(String(msg.composerId).slice(3)) : ooWorks(msg.composerId)),
+  mbComposerSearch: (msg) => mbComposerSearch(msg.q),
 };
 
 chrome.runtime.onConnect.addListener((port) => {

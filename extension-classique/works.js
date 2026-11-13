@@ -46,6 +46,7 @@ window.__dzWorks = function createWorks(ctx) {
     composer: null, works: null, wf: { text: "", genre: "all", form: null, instrument: null, popularOnly: false },
     work: null, entries: new Map(), enrich: new Map(), progress: null, done: false, error: null, cachedAt: null,
     sel: {}, open: {}, sort: "popular", text: "", shown: PAGE,
+    mov: "all",                  // durée prise en compte pour le tempo : "all" ou n° de mouvement
   };
   let port = null, requested = new Set(), lastPrio = "", cards = new Map();
   let container = null, refs = null, builtKey = "";
@@ -73,7 +74,7 @@ window.__dzWorks = function createWorks(ctx) {
     go("work", {
       work: w, entries: new Map(), enrich: new Map(), progress: null, done: false, error: null, cachedAt: null,
       // Par défaut, seules les versions complètes (les compilations d'extraits sont nombreuses).
-      sel: { version: new Set(["Œuvre complète"]) }, open: {}, text: "", shown: PAGE,
+      sel: { version: new Set(["Œuvre complète"]) }, open: {}, text: "", shown: PAGE, mov: "all",
     });
     requested = new Set(); lastPrio = ""; cards = new Map();
     port = chrome.runtime.connect({ name: "works" });
@@ -95,16 +96,112 @@ window.__dzWorks = function createWorks(ctx) {
     S.q = v;
     clearTimeout(searchTimer);
     if (v.trim().length < 3) { S.results = null; schedule(); return; }
+    // Deux sources en parallèle : Open Opus (rapide, compositeurs principaux)
+    // puis MusicBrainz (tous les autres, tolère les fautes de frappe).
     searchTimer = setTimeout(async () => {
-      S.searching = true; schedule();
-      try { S.results = await call("ooComposerSearch", { q: v }); } catch (e) { S.results = { error: e.message }; }
-      S.searching = false; schedule();
-    }, 300);
+      const token = (S.searchToken = {});
+      S.searching = true; S.results = []; schedule();
+      const key = (c) => `${norm(c.complete_name)}`.split(" ").pop() + (c.birth || "");
+      const merge = (list) => {
+        if (S.searchToken !== token) return;
+        const seen = new Set(S.results.map(key));
+        S.results = [...S.results, ...list.filter((c) => !seen.has(key(c)))];
+        schedule();
+      };
+      const oo = call("ooComposerSearch", { q: v }).then(merge).catch(() => {});
+      const mbz = call("mbComposerSearch", { q: v }).then(merge).catch(() => {});
+      await Promise.all([oo, mbz]);
+      if (S.searchToken === token) { S.searching = false; schedule(); }
+    }, 350);
   }
 
   // --- Données dérivées d'un enregistrement -------------------------------------
   const composerKey = () => norm(S.composer?.name || "").replace(/\s/g, "").slice(0, 5);
   let modeTracks = 1;
+
+  // --- Mouvements et durées -------------------------------------------------------
+  // « …Op. 30: I. Allegro ma non tanto (Live) » -> { n: 1, name: "Allegro ma non tanto" }
+  const ROMAN = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6, vii: 7, viii: 8, ix: 9, x: 10, xi: 11, xii: 12 };
+  function movementOf(title) {
+    const clean = (x) => x.replace(/\s*[([][^)\]]*[)\]]\s*/g, " ").replace(/\s+/g, " ").trim();
+    const tail = title.split(/\s[:\-–]\s|:\s/).pop();
+    let m = tail.match(/^\s*([ivx]{1,4})\.\s*(.*)$/i);
+    if (m && ROMAN[m[1].toLowerCase()]) return { n: ROMAN[m[1].toLowerCase()], name: clean(m[2]) };
+    m = tail.match(/^\s*(\d{1,2})[.)]\s*(.*)$/);
+    if (m) return { n: +m[1], name: clean(m[2]) };
+    m = title.match(/[\s,]([IVX]{1,4})\.\s+([^:,]+)$/);
+    if (m && ROMAN[m[1].toLowerCase()]) return { n: ROMAN[m[1].toLowerCase()], name: clean(m[2]) };
+    return null;
+  }
+  // Durée de chaque mouvement (n° -> secondes) ; à défaut de numéros, l'ordre des pistes.
+  function movementsOf(e) {
+    const out = new Map();
+    let numbered = true;
+    for (const t of e.tracks) {
+      const mv = movementOf(t.title);
+      if (!mv) { numbered = false; break; }
+      if (!out.has(mv.n)) out.set(mv.n, t.duration || 0);
+    }
+    if (!numbered) {
+      out.clear();
+      if (e.tracks.length === modeTracks) e.tracks.forEach((t, i) => out.set(i + 1, t.duration || 0));
+    }
+    return out;
+  }
+  const ROM = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
+  // Nom le plus fréquent de chaque mouvement (« I. Allegro ma non tanto »).
+  function movementLabels() {
+    const names = new Map();
+    for (const e of S.entries.values()) for (const t of e.tracks) {
+      const mv = movementOf(t.title);
+      if (!mv || mv.n > modeTracks) continue;
+      const m = names.get(mv.n) || new Map();
+      const key = mv.name.replace(/\s*,\s*/g, " ").toLowerCase();
+      m.set(key, { name: mv.name.replace(/\s*,\s*(?=ma |non )/i, " "), n: (m.get(key)?.n || 0) + 1 });
+      names.set(mv.n, m);
+    }
+    return [...names.entries()].sort((a, b) => a[0] - b[0])
+      .map(([n, m]) => [n, `${ROM[n] || n}. ${[...m.values()].sort((a, b) => b.n - a.n)[0].name}`]);
+  }
+  const fmtDur = (s) => {
+    s = Math.round(s);
+    const hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = String(s % 60).padStart(2, "0");
+    return hh ? `${hh}:${String(mm).padStart(2, "0")}:${ss}` : `${mm}:${ss}`;
+  };
+  const TEMPO = ["Très rapide", "Rapide", "Médian", "Lent", "Très lent"];
+  const TEMPO_EDGES = [-0.10, -0.04, 0.04, 0.10]; // écart à la médiane
+  const tempoOf = (dev) => TEMPO[TEMPO_EDGES.filter((x) => dev > x).length];
+  let tempoStats = null; // { median, min, max, n }
+
+  // Durée retenue pour chaque enregistrement (œuvre entière ou un mouvement),
+  // écart à la médiane et tranche de tempo.
+  function computeTempo(all) {
+    for (const { e, d } of all) {
+      const movs = movementsOf(e);
+      d.hasMov = S.mov === "all" || movs.has(S.mov);
+      let dur = 0;
+      if (S.mov === "all") {
+        if (d.version[0] === "Œuvre complète") {
+          dur = movs.size >= modeTracks ? [...movs.values()].reduce((a, b) => a + b, 0)
+            : e.tracks.length === modeTracks ? e.tracks.reduce((a, t) => a + (t.duration || 0), 0) : 0;
+        }
+      } else dur = movs.get(S.mov) || 0;
+      d.dur = e.arrangement ? 0 : dur; // arrangements et adaptations : pas comparables
+    }
+    // Médiane, puis exclusion des valeurs aberrantes (extrait raccourci, mouvements
+    // enchaînés dans une même piste…) : plus de 35 % d'écart.
+    let durs = all.map(({ d }) => d.dur).filter(Boolean).sort((a, b) => a - b);
+    if (durs.length >= 3) {
+      const med = durs[Math.floor(durs.length / 2)];
+      for (const { d } of all) if (d.dur && Math.abs(d.dur - med) / med > 0.35) d.dur = 0;
+      durs = all.map(({ d }) => d.dur).filter(Boolean).sort((a, b) => a - b);
+    }
+    tempoStats = durs.length >= 3 ? { median: durs[Math.floor(durs.length / 2)], min: durs[0], max: durs[durs.length - 1], n: durs.length } : null;
+    for (const { d } of all) {
+      d.dev = tempoStats && d.dur ? (d.dur - tempoStats.median) / tempoStats.median : null;
+      d.tempo = d.dev != null ? [tempoOf(d.dev)] : [];
+    }
+  }
 
   function derive(e) {
     const mb = S.enrich.get(e.id);
@@ -146,7 +243,7 @@ window.__dzWorks = function createWorks(ctx) {
   }
 
   const FACETS = [
-    ["soloists", "Soliste / interprète"], ["ensembles", "Orchestre / ensemble"], ["conductors", "Chef"],
+    ["tempo", "Tempo"], ["soloists", "Soliste / interprète"], ["ensembles", "Orchestre / ensemble"], ["conductors", "Chef"],
     ["label", "Label"], ["decade", "Décennie"], ["live", "Live / studio"], ["placeType", "Type de lieu"],
     ["place", "Lieu d'enregistrement"], ["engineers", "Ingénieur du son"], ["producers", "Directeur artistique"],
     ["version", "Version"],
@@ -163,6 +260,7 @@ window.__dzWorks = function createWorks(ctx) {
   function filtered(derived, exceptKey) {
     const q = norm(S.text);
     return derived.filter(({ e, d }) => {
+      if (d.hasMov === false) return false;
       if (q && !norm(`${e.album.title} ${e.album.contributors.join(" ")} ${e.album.label} ${d.place.join(" ")} ${d.engineers.join(" ")}`).includes(q)) return false;
       for (const [k] of FACETS) {
         if (k === exceptKey) continue;
@@ -177,6 +275,8 @@ window.__dzWorks = function createWorks(ctx) {
     const by = {
       popular: (a, b) => b.e.album.fans - a.e.album.fans,
       recent: (a, b) => b.d.year - a.d.year,
+      fast: (a, b) => (a.d.dur || Infinity) - (b.d.dur || Infinity),
+      slow: (a, b) => (b.d.dur || -1) - (a.d.dur || -1),
       old: (a, b) => (a.d.year || 9999) - (b.d.year || 9999),
       artist: (a, b) => (a.d.soloists[0] || a.d.ensembles[0] || "~").localeCompare(b.d.soloists[0] || b.d.ensembles[0] || "~"),
     };
@@ -230,7 +330,10 @@ window.__dzWorks = function createWorks(ctx) {
       h("input", { type: "search", class: "w-big", placeholder: "Rachmaninov, Bach, Debussy…", value: S.q, oninput: (e) => onSearchInput(e.target.value) }),
       r.results,
       h("h3", {}, "Compositeurs populaires"),
-      r.popular));
+      r.popular,
+      h("label", { class: "pref small muted" },
+        h("input", { type: "checkbox", checked: ctx.prefs().inApp !== false, onchange: (e) => ctx.setPref("inApp", e.target.checked) }),
+        " Ouvrir les albums sans recharger la page (décochez si un clic sur un album ne fait rien)")));
     if (!S.popular) call("ooPopularComposers").then((p) => { S.popular = p; schedule(); }).catch(() => {});
     setTimeout(() => r.root.querySelector("input")?.focus({ preventScroll: true }), 0);
   }
@@ -240,13 +343,13 @@ window.__dzWorks = function createWorks(ctx) {
     return h("button", { class: "w-composer", onclick: () => openComposer(c) },
       c.portrait ? img : h("div", { class: "ph" }, (c.name || "?")[0]),
       h("div", {}, h("div", { class: "strong" }, c.complete_name || c.name),
-        h("div", { class: "muted small" }, [c.birth && `${c.birth}–${c.death || ""}`, c.epoch].filter(Boolean).join(" · "))));
+        h("div", { class: "muted small" }, [c.birth && `${c.birth}–${c.death || ""}`, c.epoch, c.source === "mb" ? "MusicBrainz" : ""].filter(Boolean).join(" · "))));
   }
   function patchHome(r) {
     r.results.replaceChildren(...[
-      S.searching ? h("div", { class: "muted" }, "Recherche…") : "",
-      S.results?.error ? h("div", { class: "error" }, S.results.error) : "",
-      Array.isArray(S.results) ? (S.results.length ? S.results.map(composerCard) : h("div", { class: "muted" }, "Aucun compositeur trouvé.")) : "",
+      Array.isArray(S.results) ? S.results.map(composerCard) : "",
+      S.searching ? h("div", { class: "muted small" }, S.results?.length ? "Recherche dans MusicBrainz…" : "Recherche…") : "",
+      !S.searching && Array.isArray(S.results) && !S.results.length ? h("div", { class: "muted" }, "Aucun compositeur trouvé.") : "",
     ].flat());
     if (r.popular.childElementCount !== (S.popular || []).length) r.popular.replaceChildren(...(S.popular || []).map(composerCard));
   }
@@ -267,16 +370,21 @@ window.__dzWorks = function createWorks(ctx) {
         h("input", { type: "search", placeholder: "Filtrer les œuvres : concerto, op. 18, sonate…", value: S.wf.text,
           oninput: (e) => { S.wf.text = e.target.value; patchComposer(r); } }),
         h("label", { class: "small" }, h("input", { type: "checkbox", checked: S.wf.popularOnly,
-          onchange: (e) => { S.wf.popularOnly = e.target.checked; patchComposer(r); } }), " Œuvres populaires"),
+          onchange: (e) => { S.wf.popularOnly = e.target.checked; patchComposer(r); } }), " Œuvres populaires et recommandées"),
+        h("span", { class: "muted small", title: "Selon Open Opus. « Recommandée » : œuvre jugée essentielle, sans étoile." }, "★ = œuvre populaire"),
         r.count),
       r.chips, r.list));
   }
   function patchComposer(r) {
-    if (!S.works) { r.list.replaceChildren(h("div", { class: "muted" }, "Chargement des œuvres…")); return; }
+    if (!S.works) {
+      r.list.replaceChildren(h("div", { class: "muted" }, S.composer?.source === "mb"
+        ? "Chargement des œuvres depuis MusicBrainz (quelques secondes la première fois)…" : "Chargement des œuvres…"));
+      return;
+    }
     if (S.works.error) { r.list.replaceChildren(h("div", { class: "error" }, S.works.error)); return; }
     const f = S.wf, q = norm(f.text);
     const pass = (w, except) =>
-      (except === "genre" || f.genre === "all" || w.genre === f.genre) &&
+      (except === "genre" || f.genre === "all" || (w.genre || "Autre") === f.genre) &&
       (except === "form" || !f.form || w.forms.includes(f.form)) &&
       (except === "instrument" || !f.instrument || w.instruments.includes(f.instrument)) &&
       (!f.popularOnly || w.popular || w.recommended) &&
@@ -295,16 +403,16 @@ window.__dzWorks = function createWorks(ctx) {
           v === "__all" ? "Tous" : `${labelOf(v)} `, v === "__all" ? "" : h("span", { class: "n" }, n));
       })) : "";
     r.chips.replaceChildren(
-      chipRow("Genre", "genre", countBy("genre", (w) => [w.genre]), (v) => GENRES[v] || v),
+      chipRow("Genre", "genre", countBy("genre", (w) => [w.genre || "Autre"]), (v) => GENRES[v] || v),
       chipRow("Forme", "form", countBy("form", (w) => w.forms).slice(0, 16)),
       chipRow("Instrument", "instrument", countBy("instrument", (w) => w.instruments).slice(0, 14)));
     const list = S.works.filter((w) => pass(w))
       .sort((a, b) => (b.popular + b.recommended) - (a.popular + a.recommended) || a.title.localeCompare(b.title, undefined, { numeric: true }));
     r.count.textContent = `${list.length} œuvre${list.length > 1 ? "s" : ""}`;
     r.list.replaceChildren(...list.map((w) => h("button", { class: "w-work", onclick: () => openWork(w) },
-      h("div", {}, h("div", { class: "strong" }, w.title, w.popular ? h("span", { class: "star", title: "Œuvre populaire" }, " ★") : ""),
+      h("div", {}, h("div", { class: "strong" }, w.title, w.popular ? h("span", { class: "star", title: "Œuvre populaire : parmi les plus jouées et les plus connues du compositeur (selon Open Opus)" }, " ★") : ""),
         w.subtitle ? h("div", { class: "muted small" }, w.subtitle) : ""),
-      h("span", { class: "tag" }, GENRES[w.genre] || w.genre))));
+      w.genre ? h("span", { class: "tag" }, GENRES[w.genre] || w.genre) : "")));
   }
 
   // Œuvre : enregistrements disponibles sur Deezer + facettes.
@@ -318,7 +426,7 @@ window.__dzWorks = function createWorks(ctx) {
     r.root.append(
       h("div", { class: "w-workhead" },
         crumbs({ label: "Compositeurs", onclick: () => go("home") }, { label: c.complete_name || c.name, onclick: () => go("composer") }, { label: w.title }),
-        h("h2", {}, w.title), r.status),
+        h("h2", {}, w.title), r.movs = h("div", { class: "w-movs" }), r.status),
       h("div", { class: "w-cols" },
         r.facets,
         h("section", { class: "w-results" },
@@ -326,10 +434,20 @@ window.__dzWorks = function createWorks(ctx) {
             h("input", { type: "search", placeholder: "Filtrer : interprète, orchestre, label, lieu…", value: S.text,
               oninput: (e) => { S.text = e.target.value; S.shown = PAGE; patchWork(r); } }),
             h("span", { class: "select" }, h("select", { onchange: (e) => { S.sort = e.target.value; patchWork(r); } },
-              [["popular", "Popularité"], ["recent", "Plus récents"], ["old", "Plus anciens"], ["artist", "Interprète"]]
+              [["popular", "Popularité"], ["fast", "Plus rapide"], ["slow", "Plus lent"], ["recent", "Plus récents"], ["old", "Plus anciens"], ["artist", "Interprète"]]
                 .map(([v, t]) => h("option", { value: v, selected: S.sort === v }, t)))),
             r.count),
           r.grid, r.tail)));
+  }
+
+  function selectMovement(r, v) {
+    if (S.mov === v) return;
+    if (v !== "all" && S.mov === "all") { S.savedVersion = S.sel.version; S.sel.version = new Set(); }
+    if (v === "all") S.sel.version = S.savedVersion || new Set(["Œuvre complète"]);
+    S.mov = v;
+    S.sel.tempo = new Set();
+    S.shown = PAGE;
+    patchWork(r);
   }
 
   function patchWork(r) {
@@ -354,6 +472,19 @@ window.__dzWorks = function createWorks(ctx) {
       S.error ? h("div", { class: "error" }, S.error) : "",
       (!S.done || S.enrich.size < all.length) ? bar : "");
 
+    // Mouvements : « Œuvre entière » ou un mouvement précis. Un mouvement choisi
+    // affiche tous les enregistrements qui le contiennent (extraits compris) et
+    // sert de référence pour le tempo.
+    const labels = modeTracks >= 2 && modeTracks <= 12 ? movementLabels() : [];
+    if (S.mov !== "all" && labels.length && !labels.some(([n]) => n === S.mov)) S.mov = "all";
+    const movKey = `${labels.map((l) => l.join(":")).join("|")}#${S.mov}`;
+    if (r.movs.dataset.key !== movKey) {
+      r.movs.dataset.key = movKey;
+      const chip = (v, label) => h("button", { class: `chip${S.mov === v ? " sel" : ""}`, onclick: () => selectMovement(r, v) }, label);
+      r.movs.replaceChildren(...(labels.length ? [chip("all", "Œuvre entière"), ...labels.map(([n, l]) => chip(n, l))] : []));
+    }
+    computeTempo(all);
+
     // Facettes : nombre de résultats par valeur, compte tenu des autres filtres.
     r.facets.replaceChildren(...FACETS.map(([k, label]) => {
       const counts = new Map();
@@ -361,11 +492,23 @@ window.__dzWorks = function createWorks(ctx) {
       const sel = S.sel[k] || new Set();
       for (const v of sel) if (!counts.has(v)) counts.set(v, 0);
       if (!counts.size) return "";
-      const items = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-      const limit = S.open[k] ? items.length : 6;
+      const items = k === "tempo"
+        ? [...counts.entries()].sort((a, b) => TEMPO.indexOf(a[0]) - TEMPO.indexOf(b[0]))
+        : [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      const limit = S.open[k] || k === "tempo" ? items.length : 6;
       const shown = items.filter(([v], i) => i < limit || sel.has(v));
+      // Tranches de tempo : bornes en minutes:secondes, d'après la médiane.
+      const hint = (v) => {
+        if (k !== "tempo" || !tempoStats) return "";
+        const i = TEMPO.indexOf(v), m = tempoStats.median;
+        const lo = i > 0 ? fmtDur(m * (1 + TEMPO_EDGES[i - 1])) : "", hi = i < 4 ? fmtDur(m * (1 + TEMPO_EDGES[i])) : "";
+        return lo && hi ? `${lo}–${hi}` : lo ? `> ${lo}` : `< ${hi}`;
+      };
       return h("div", { class: "w-facet" },
-        h("div", { class: "w-facet-title" }, label, sel.size ? h("button", { class: "link small", onclick: () => { S.sel[k] = new Set(); S.shown = PAGE; patchWork(r); } }, "effacer") : ""),
+        h("div", { class: "w-facet-title" }, k === "tempo" ? `Tempo (${S.mov === "all" ? "œuvre entière" : `mouvement ${S.mov}`})` : label,
+          sel.size ? h("button", { class: "link small", onclick: () => { S.sel[k] = new Set(); S.shown = PAGE; patchWork(r); } }, "effacer") : ""),
+        k === "tempo" && tempoStats ? h("div", { class: "muted small w-tempo-stats" },
+          `Médiane ${fmtDur(tempoStats.median)} · de ${fmtDur(tempoStats.min)} à ${fmtDur(tempoStats.max)} (${tempoStats.n} versions)`) : "",
         shown.map(([v, n]) => h("label", { class: `w-opt${sel.has(v) ? " on" : ""}` },
           h("input", { type: "checkbox", checked: sel.has(v), onchange: (e) => {
             const s = S.sel[k] || (S.sel[k] = new Set());
@@ -373,7 +516,7 @@ window.__dzWorks = function createWorks(ctx) {
             S.shown = PAGE;
             patchWork(r);
           } }),
-          h("span", { class: "v" }, v), h("span", { class: "n" }, n))),
+          h("span", { class: "v" }, v, hint(v) ? h("span", { class: "muted small" }, ` ${hint(v)}`) : ""), h("span", { class: "n" }, n))),
         items.length > 6 ? h("button", { class: "link small", onclick: () => { S.open[k] = !S.open[k]; patchWork(r); } },
           S.open[k] ? "moins" : `+ ${items.length - 6} autres`) : "");
     }));
@@ -397,6 +540,9 @@ window.__dzWorks = function createWorks(ctx) {
   function cardFor({ e, d }) {
     let el = cards.get(e.id);
     if (!el) { el = card(e, d); cards.set(e.id, el); }
+    // Durée et écart à la médiane : mis à jour sans reconstruire la carte.
+    const txt = d.dur ? `⏱ ${S.mov === "all" ? "" : `${ROM[S.mov] || S.mov}. `}${fmtDur(d.dur)}${d.dev != null ? ` · ${d.dev > 0 ? "+" : "−"}${Math.abs(Math.round(d.dev * 100))} %` : ""}` : "";
+    if (el._dur.textContent !== txt) el._dur.textContent = txt;
     return el;
   }
 
@@ -406,14 +552,18 @@ window.__dzWorks = function createWorks(ctx) {
     const solo = d.mb ? d.mb.soloists.map((s) => s.name + (s.instrument ? ` (${s.instrument})` : "")) : d.soloists;
     const line2 = [d.ensembles.join(", "), d.conductors.length ? `dir. ${d.conductors.join(", ")}${d.guessed ? " ?" : ""}` : ""].filter(Boolean).join(" · ");
     const meta = [d.year || "", a.label].filter(Boolean).join(" · ");
+    const dur = h("div", { class: "m dur" });
     const rec = d.mb ? [d.mb.live ? "Live" : "", d.mb.place ? d.mb.place.name : "", d.mb.engineers.length ? `ing. ${d.mb.engineers.join(", ")}` : ""].filter(Boolean).join(" · ") : "";
-    return h("a", { class: "item", href: `/${ctx.lang()}/album/${a.id}`, title: `${a.title}\n${a.contributors.join(", ")}`, onclick: (ev) => openAlbum(a.id, ev) },
+    const el = h("a", { class: "item", href: `/${ctx.lang()}/album/${a.id}`, title: `${a.title}\n${a.contributors.join(", ")}`, onclick: (ev) => openAlbum(a.id, ev) },
       h("div", { class: "cover" }, cover, d.version[0] !== "Œuvre complète" ? h("span", { class: "w-badge" }, d.version[0] === "Extrait" ? `Extrait (${e.tracks.length}/${modeTracks})` : "Arrangement") : ""),
       h("div", { class: "t" }, a.title),
       solo.length ? h("div", { class: "a" }, solo.join(", ")) : "",
       line2 ? h("div", { class: "a" }, line2) : "",
       h("div", { class: "m" }, meta),
-      rec ? h("div", { class: "m rec" }, rec) : "");
+      rec ? h("div", { class: "m rec" }, rec) : "",
+      dur);
+    el._dur = dur;
+    return el;
   }
 
   return {
