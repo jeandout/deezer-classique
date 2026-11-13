@@ -1,7 +1,7 @@
 // Service worker de l'application web : garde l'interface disponible hors
 // ligne. Les données (API) ne passent pas par ici ; leur cache est dans IndexedDB.
 const VERSION = "classique-v1";
-const SHELL = ["./", "index.html", "shim.js", "styles.js", "background.js", "bg-works.js", "works.js", "app.js",
+const SHELL = ["./", "index.html", "shim.js", "styles.js", "background.js", "bg-works.js", "bg-labels.js", "works.js", "app.js",
   "manifest.webmanifest", "icons/192.png", "icons/512.png", "icons/favicon-32.png", "icons/apple-touch-icon.png"];
 
 self.addEventListener("install", (e) => {

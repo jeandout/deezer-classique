@@ -4,7 +4,7 @@
 
 const MB = "https://musicbrainz.org/ws/2";
 const DZ = "https://api.deezer.com";
-const USER_AGENT = "DeezerClassique/0.8 (extension personnelle)";
+const USER_AGENT = "DeezerClassique/0.9 (extension personnelle)";
 
 const DAY = 24 * 3600 * 1000;
 const TTL = {};
@@ -120,12 +120,13 @@ function norm(s) {
 }
 
 // --- Mode Œuvres -------------------------------------------------------------
-importScripts("bg-works.js");
+importScripts("bg-works.js", "bg-labels.js");
 
 // --- Messages depuis le panneau ----------------------------------------------
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const handlers = {
     ...worksHandlers,
+    ...labelsHandlers,
     getPrefs: async () => (await chrome.storage.local.get("prefs")).prefs || {},
     setPrefs: async () => {
       const prefs = { ...((await chrome.storage.local.get("prefs")).prefs || {}), ...msg.prefs };
