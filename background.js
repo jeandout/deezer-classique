@@ -363,7 +363,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     },
     clearCatalog: async () => { await chrome.storage.local.remove([`cat:${msg.mbid}`, `catp:${msg.mbid}`, `li:${msg.mbid}`]); return true; },
   };
-  const h = handlers[msg?.type];
+  const wh = typeof worksHandlers !== "undefined" && worksHandlers[msg?.type];
+  const h = handlers[msg?.type] || (wh && (() => wh(msg)));
   if (!h) return false;
   Promise.resolve(h())
     .then((data) => sendResponse({ ok: true, data }))
@@ -433,3 +434,6 @@ chrome.action.onClicked.addListener(async (tab) => {
 
 // Exposé pour les tests.
 self.__test = { norm, similarity, labelMatches, barcodeVariants, addReleasesToGroups };
+
+// Mode « Œuvres » (compositeurs, œuvres, enregistrements).
+importScripts("bg-works.js");
