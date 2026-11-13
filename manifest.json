@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Deezer – Catalogues de labels",
+  "version": "0.4.2",
+  "description": "Parcourir le catalogue d'un label (via MusicBrainz) et l'écouter sur Deezer.",
+  "permissions": ["storage", "unlimitedStorage", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": [
+    "https://api.deezer.com/*",
+    "https://musicbrainz.org/*",
+    "https://www.deezer.com/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.deezer.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": { "default_title": "Catalogues de labels" },
+  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" }
+}
