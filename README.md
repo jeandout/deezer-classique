@@ -1,71 +1,83 @@
-# Deezer – Catalogues de labels (extension Chrome)
+# Deezer Classique (extension Chrome)
 
-Ajoute à deezer.com une recherche par label : on retrouve le catalogue complet
-d'un label dans **MusicBrainz**, puis chaque album est recherché sur **Deezer**
-pour être écouté directement dans le lecteur web.
+Un moteur de recherche pour la musique classique, intégré au lecteur web de Deezer :
+compositeur → œuvre → tous ses enregistrements écoutables sur Deezer, filtrables par
+soliste, orchestre, chef, label, époque, live / studio, lieu et ingénieur du son.
+Un second mode parcourt le catalogue complet d'un label et de ses sous-labels.
 
 ## Installation
 
-1. Décompressez le dossier `deezer-label-browser` quelque part où il restera (ne le supprimez pas ensuite).
+1. Téléchargez le zip (ou le dépôt) et décompressez le dossier quelque part où il restera.
 2. Dans Chrome, ouvrez `chrome://extensions`.
 3. Activez le **Mode développeur** (en haut à droite).
-4. Cliquez sur **Charger l'extension non empaquetée** et choisissez le dossier `deezer-label-browser`.
+4. Cliquez sur **Charger l'extension non empaquetée** et choisissez le dossier.
 5. Ouvrez ou rechargez https://www.deezer.com.
 
-Pour une mise à jour : remplacez les fichiers, puis cliquez sur ⟳ dans `chrome://extensions` et rechargez Deezer.
+Pour une mise à jour : remplacez les fichiers, cliquez sur ⟳ dans `chrome://extensions`, puis rechargez Deezer.
 
-## Utilisation
+## Mode Œuvres (bouton 🎼 Classique)
 
-- **Mention légale cliquable** : en bas de chaque page d'album, les lignes « © 2004 Chandos Records »
-  et « ℗ 2004 Chandos Records » sont cliquables et ouvrent directement le catalogue du label.
-- Un onglet violet **🏷** apparaît aussi à droite de la page. Sur une page d'album, il affiche le label de l'album.
-- Le label est identifié dans MusicBrainz grâce au code-barres de l'album (identification exacte).
-  Si l'extension ne peut pas trancher, elle propose une liste de labels.
-- **Recherche libre** : tapez un nom de label (Harmonia Mundi, BIS, Alpha, Chandos…). Tous les labels dont le nom
-  ou la description contient ce mot sont **cochés d'office** (ex. pour « chandos » : Chandos, Chaconne, Chandos Classics,
-  Chandos Historical…), sauf les éditeurs (Publisher) et les entrées « not for release label use ».
-  Ajustez les cases puis « Parcourir les N labels cochés » : ils forment un seul catalogue, sans doublons.
-- **Sous-labels inclus automatiquement** : en ouvrant un label (Chandos), ses sous-labels et marques connus de
-  MusicBrainz (Chaconne…) sont ajoutés et cochés. En haut du catalogue, chaque label se coche ou se décoche d'un clic ;
-  un label décoché reste affiché pour pouvoir le recocher. Les autres labels liés (label parent, distributeur…)
-  s'ajoutent avec « + ».
-- Le catalogue n'affiche que les albums **disponibles sur Deezer**. Ils apparaissent au fur et à mesure des vérifications.
-  - filtre par titre, compositeur, interprète ou **numéro de catalogue** ;
-  - tri par date, numéro de catalogue, titre ou artiste ;
-  - les labels liés (label parent, sous-labels, anciens noms) sont cliquables.
-- Clic sur un album → il s'ouvre dans Deezer sans couper la lecture. Ctrl+clic → nouvel onglet.
-- Le panneau reprend la police et les couleurs de Deezer (thème clair ou sombre).
+1. **Compositeur** : tapez un nom, ou choisissez parmi les compositeurs populaires.
+2. **Œuvres** : la liste se filtre par genre (orchestre, musique de chambre, clavier,
+   vocal, scène), par forme (concerto, symphonie, sonate, quatuor…), par instrument,
+   ou par texte (« op. 18 », « concerto »…). ★ = œuvre populaire.
+3. **Enregistrements** : tous les albums Deezer qui contiennent l'œuvre. Filtres à gauche,
+   avec le nombre de résultats pour chaque valeur :
+   soliste / interprète, orchestre / ensemble, chef, label, décennie, live / studio,
+   type de lieu (studio, salle de concert, église…), lieu, ingénieur du son, directeur
+   artistique, version (complète, extrait, arrangement).
+   Par défaut, seules les versions complètes sont affichées.
+
+Un clic sur un album l'ouvre dans Deezer sans couper la lecture (Ctrl+clic : nouvel onglet).
+Échap ferme le panneau.
+
+### D'où viennent les informations
+
+| Information | Source |
+|---|---|
+| Compositeurs, œuvres, genres | [Open Opus](https://openopus.org) |
+| Albums, pistes, interprètes, label, pochettes | API publique Deezer |
+| Rôles exacts (soliste et instrument, chef, orchestre), lieu, date, live, ingénieurs, directeur artistique | [MusicBrainz](https://musicbrainz.org), via le code ISRC de chaque piste |
+
+Les détails MusicBrainz arrivent progressivement (MusicBrainz n'accepte qu'une requête
+par seconde) : environ 5 secondes par album la première fois, puis tout est en cache.
+Ils existent surtout pour les enregistrements des grands labels ; pour les autres, les
+interprètes viennent de Deezer et le chef est deviné (affiché avec « ? »).
+Aucune base ne décrit le placement des micros : le type de lieu et l'ingénieur du son
+sont les meilleurs indices.
+
+## Mode Labels (bouton 🏷 ou onglet Labels)
+
+- **Mention légale cliquable** : en bas de chaque page d'album, « © 2004 Chandos Records »
+  ouvre le catalogue du label.
+- **Recherche par nom** : tous les labels dont le nom ou la description contient le mot sont
+  cochés d'office (sauf éditeurs et « not for release »).
+- **Sous-labels inclus automatiquement** (ex. Chandos → Chaconne, Chandos Classics…) ;
+  chaque label se coche / décoche d'un clic en haut du catalogue.
+- Seuls les albums disponibles sur Deezer sont affichés ; filtre par titre, compositeur,
+  interprète, n° de catalogue ; tri par date ou n° de catalogue.
 
 ## Cache
 
-Tout est gardé dans le stockage local de Chrome, une recherche déjà faite est donc quasi instantanée :
-
 | Donnée | Durée |
 |---|---|
-| Catalogue MusicBrainz d'un label | 7 jours (lien « actualiser » pour forcer) |
-| Album trouvé sur Deezer | 90 jours |
-| Album absent de Deezer | 14 jours (on réessaie plus souvent) |
-| Recherche de label par nom | 7 jours |
-| Fiche d'un label, code-barres → label | 30 jours |
-
-Le filtre (titre, compositeur, n° de catalogue) et le tri se font localement, sans aucune requête.
+| Liste des œuvres d'un compositeur | 30 jours |
+| Enregistrements d'une œuvre sur Deezer | 7 jours |
+| Détails MusicBrainz d'un enregistrement | 90 jours (30 jours si introuvable) |
+| Catalogue d'un label | 7 jours (lien « actualiser ») |
+| Albums Deezer trouvés | 90 jours |
 
 ## Bon à savoir
 
-- **Si MusicBrainz est surchargé** (message « refuse les requêtes pour le moment »), l'extension a déjà
-  réessayé plusieurs fois en ralentissant. Les pages chargées sont conservées : le bouton
-  « Reprendre le chargement » repart de là où le chargement s'était arrêté.
-- **Lenteur au premier chargement** : MusicBrainz limite à 1 requête par seconde et renvoie
-  100 éditions par requête. Ensuite chaque album est cherché sur Deezer (environ 10 requêtes par seconde).
-  Pour un gros label (plusieurs milliers d'éditions), la première exploration complète peut prendre
-  de l'ordre d'une dizaine de minutes ; les albums s'affichent dès qu'ils sont trouvés, en commençant
-  par ceux qui correspondent au tri et au filtre choisis. Les fois suivantes, tout vient du cache.
-- **Si un clic sur un album ne fait rien** : décochez « Ouvrir les albums sans recharger la page »
-  dans l'écran d'accueil du panneau (les albums s'ouvriront alors avec un rechargement).
-- La couverture de MusicBrainz est inégale pour les petits labels classiques.
+- **Si MusicBrainz est surchargé**, l'extension réessaie plusieurs fois en ralentissant ;
+  un chargement de label interrompu peut être repris là où il s'est arrêté.
+- **Si un clic sur un album ne fait rien** : onglet Labels → décochez « Ouvrir les albums
+  sans recharger la page ».
 
 ## Fichiers
 
 - `manifest.json` – déclaration de l'extension (Manifest V3).
-- `background.js` – appels aux API, files d'attente, cache, rapprochement des albums.
-- `content.js` – bouton et panneau injectés dans deezer.com.
+- `background.js` – appels aux API, files d'attente, cache ; mode Labels.
+- `bg-works.js` – mode Œuvres : Open Opus, recherche Deezer, enrichissement MusicBrainz.
+- `works.js` – interface du mode Œuvres.
+- `content.js` – panneau injecté dans deezer.com, mode Labels.

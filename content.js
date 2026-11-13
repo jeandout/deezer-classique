@@ -24,7 +24,7 @@
       else if (k === "html") el.innerHTML = v;
       else el.setAttribute(k, v === true ? "" : v);
     }
-    for (const c of children.flat()) {
+    for (const c of children.flat(Infinity)) {
       if (c == null || c === false) continue;
       el.append(c.nodeType ? c : document.createTextNode(String(c)));
     }
